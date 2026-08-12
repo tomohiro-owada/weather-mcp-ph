@@ -126,9 +126,9 @@ describe('Saved Locations - Activities Feature', () => {
       await handleSaveLocation(
         {
           alias: 'home',
-          latitude: 47.6062,
-          longitude: -122.3321,
-          name: 'Seattle, WA'
+          latitude: 14.5995,
+          longitude: 120.9842,
+          name: 'Manila'
         },
         locationStore,
         nominatimService

@@ -121,7 +121,7 @@ describe('OpenMeteoService.getCurrentConditions()', () => {
       expect(params.longitude).toBe(-122.4194);
     });
 
-    it('should include imperial unit params by default', async () => {
+    it('should include metric unit params by default', async () => {
       const spy = vi
         .spyOn(service as any, 'makeRequestToForecast')
         .mockResolvedValue(buildValidResponse());
@@ -129,9 +129,9 @@ describe('OpenMeteoService.getCurrentConditions()', () => {
       await service.getCurrentConditions(37.7749, -122.4194);
 
       const params = spy.mock.calls[0][1] as Record<string, string | number>;
-      expect(params.temperature_unit).toBe('fahrenheit');
-      expect(params.wind_speed_unit).toBe('mph');
-      expect(params.precipitation_unit).toBe('inch');
+      expect(params.temperature_unit).toBe('celsius');
+      expect(params.wind_speed_unit).toBe('kmh');
+      expect(params.precipitation_unit).toBe('mm');
     });
 
     it('should include metric unit params when metric preferences are passed', async () => {

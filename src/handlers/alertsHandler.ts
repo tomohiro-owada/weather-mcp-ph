@@ -1,13 +1,9 @@
-/**
- * Handler for get_alerts tool
- */
-
-import { NOAAService } from '../services/noaa.js';
+import { pagasaService } from '../services/pagasa.js';
 import { LocationStore } from '../services/locationStore.js';
 import { GeocodingService } from '../services/geocoding.js';
 import { resolveLocationAsync, prependLocationLine } from '../utils/locationResolver.js';
-import { validateOptionalBoolean, validateDetail } from '../utils/validation.js';
-import { formatInTimezone, guessTimezoneFromCoords } from '../utils/timezone.js';
+import { validateDetail } from '../utils/validation.js';
+import type { PagasaAlert } from '../types/pagasa.js';
 
 interface AlertsArgs {
   latitude?: number;
@@ -18,135 +14,76 @@ interface AlertsArgs {
   detail?: 'summary' | 'standard' | 'full';
 }
 
+const severityRank: Record<string, number> = {
+  Extreme: 0,
+  Severe: 1,
+  Moderate: 2,
+  Minor: 3,
+  Unknown: 4
+};
+
+function formatDate(value: string | undefined): string {
+  if (!value) return 'Not specified';
+  return new Intl.DateTimeFormat('en-PH', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Manila'
+  }).format(new Date(value));
+}
+
+function severityEmoji(severity: string | undefined): string {
+  if (severity === 'Extreme') return '🔴';
+  if (severity === 'Severe') return '🟠';
+  if (severity === 'Moderate') return '🟡';
+  if (severity === 'Minor') return '🔵';
+  return '⚪';
+}
+
+function renderAlert(alert: PagasaAlert, detail: AlertsArgs['detail']): string {
+  const areas = alert.areas.map(area => area.description).filter(Boolean).join(', ');
+  let output = `${severityEmoji(alert.severity)} **${alert.event}**\n---\n`;
+  if (alert.headline) output += `**${alert.headline}**\n\n`;
+  output += `**Severity:** ${alert.severity ?? 'Unknown'} | `;
+  output += `**Urgency:** ${alert.urgency ?? 'Unknown'} | `;
+  output += `**Certainty:** ${alert.certainty ?? 'Unknown'}\n`;
+  output += `**Area:** ${areas || 'Philippines'}\n`;
+  output += `**Issued:** ${formatDate(alert.sent)}\n`;
+  output += `**Expires:** ${formatDate(alert.expires)}\n`;
+  if (detail === 'full' && alert.description) {
+    output += `\n**Description:**\n${alert.description}\n`;
+  }
+  if (detail !== 'summary' && alert.instruction) {
+    output += `\n**Instructions:**\n${alert.instruction}\n`;
+  }
+  if (alert.web) output += `\n**Official information:** ${alert.web}\n`;
+  output += `\n**Sender:** ${alert.senderName ?? 'PAGASA-DOST'}\n\n`;
+  return output;
+}
+
 export async function handleGetAlerts(
   args: unknown,
-  noaaService: NOAAService,
   locationStore: LocationStore,
   geocodingService: GeocodingService
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
-  // Resolve location from coordinates, a saved location name, or a geocoded city name
-  const resolved = await resolveLocationAsync(args as AlertsArgs, locationStore, geocodingService);
-  const { latitude, longitude } = resolved;
-  const active_only = validateOptionalBoolean(
-    (args as AlertsArgs)?.active_only,
-    'active_only',
-    true
+  const typedArgs = (args ?? {}) as AlertsArgs;
+  const resolved = await resolveLocationAsync(typedArgs, locationStore, geocodingService);
+  const detail = validateDetail(typedArgs.detail);
+  const alerts = await pagasaService.getAlertsForPoint(resolved.latitude, resolved.longitude);
+  alerts.sort((a, b) =>
+    (severityRank[a.severity ?? 'Unknown'] ?? 4) - (severityRank[b.severity ?? 'Unknown'] ?? 4)
   );
-  // Output verbosity: 'full' includes the complete NWS description text.
-  const detail = validateDetail((args as AlertsArgs)?.detail);
 
-  // Get timezone for proper time formatting
-  let timezone = guessTimezoneFromCoords(latitude, longitude); // fallback
-  try {
-    // Try to get timezone from station (preferred)
-    const stations = await noaaService.getStations(latitude, longitude);
-    if (stations.features && stations.features.length > 0) {
-      const stationTimezone = stations.features[0].properties.timeZone;
-      if (stationTimezone) {
-        timezone = stationTimezone;
-      }
-    }
-  } catch (error) {
-    // Use fallback timezone
-  }
-
-  // Get alerts data
-  const alertsData = await noaaService.getAlerts(latitude, longitude, active_only);
-  const alerts = alertsData.features;
-
-  // Format the alerts for display
-  let output = `# Weather Alerts\n\n`;
-  output += `**Location:** ${latitude.toFixed(4)}, ${longitude.toFixed(4)}\n`;
-  output += `**Status:** ${active_only ? 'Active alerts only' : 'All alerts'}\n`;
-  if (alertsData.updated) {
-    output += `**Updated:** ${formatInTimezone(alertsData.updated, timezone)}\n`;
-  }
-  output += `\n`;
-
+  let output = '# PAGASA Weather Alerts\n\n';
+  output += '**Status:** Active alerts only\n\n';
   if (alerts.length === 0) {
-    output += `✅ **No active weather alerts for this location.**\n\n`;
-    output += `The area is currently clear of weather warnings, watches, and advisories.\n`;
+    output += '✅ **No active PAGASA alert polygons include this location.**\n\n';
+    output += 'Always check PAGASA and local government notices during rapidly changing conditions.\n';
   } else {
-    output += `⚠️ **${alerts.length} active alert${alerts.length > 1 ? 's' : ''} found**\n\n`;
-
-    // Sort alerts by severity (Extreme > Severe > Moderate > Minor > Unknown)
-    type SeverityLevel = 'Extreme' | 'Severe' | 'Moderate' | 'Minor' | 'Unknown';
-    const severityOrder: Record<SeverityLevel, number> = {
-      'Extreme': 0,
-      'Severe': 1,
-      'Moderate': 2,
-      'Minor': 3,
-      'Unknown': 4
-    };
-
-    // Cache severity values to avoid repeated lookups during sort
-    const alertsWithSeverity = alerts.map(alert => ({
-      alert,
-      severityValue: severityOrder[alert.properties.severity as SeverityLevel] ?? 4
-    }));
-
-    const sortedAlerts = alertsWithSeverity
-      .sort((a, b) => a.severityValue - b.severityValue)
-      .map(item => item.alert);
-
-    for (const alert of sortedAlerts) {
-      const props = alert.properties;
-
-      // Severity emoji
-      const severityEmoji = props.severity === 'Extreme' ? '🔴' :
-                            props.severity === 'Severe' ? '🟠' :
-                            props.severity === 'Moderate' ? '🟡' :
-                            props.severity === 'Minor' ? '🔵' : '⚪';
-
-      output += `${severityEmoji} **${props.event}**\n`;
-      output += `---\n`;
-
-      if (props.headline) {
-        output += `**${props.headline}**\n\n`;
-      }
-
-      output += `**Severity:** ${props.severity} | **Urgency:** ${props.urgency} | **Certainty:** ${props.certainty}\n`;
-      output += `**Area:** ${props.areaDesc}\n`;
-      output += `**Effective:** ${formatInTimezone(props.effective, timezone)}\n`;
-      output += `**Expires:** ${formatInTimezone(props.expires, timezone)}\n`;
-
-      if (props.onset && props.onset !== props.effective) {
-        output += `**Onset:** ${formatInTimezone(props.onset, timezone)}\n`;
-      }
-
-      if (props.ends) {
-        output += `**Ends:** ${formatInTimezone(props.ends, timezone)}\n`;
-      }
-
-      // Full NWS description text is verbose; include it only at detail=full.
-      if (detail === 'full' && props.description) {
-        output += `\n**Description:**\n${props.description}\n`;
-      }
-
-      // Actionable instructions are surfaced at standard and full (not summary).
-      if (detail !== 'summary' && props.instruction) {
-        output += `\n**Instructions:**\n${props.instruction}\n`;
-      }
-
-      output += `\n**Recommended Response:** ${props.response}\n`;
-      output += `**Sender:** ${props.senderName}\n\n`;
-    }
-
-    if (detail !== 'full') {
-      output += `*Showing ${detail === 'summary' ? 'a condensed summary' : 'standard detail'}. `;
-      output += `Use detail="full" for complete alert descriptions.*\n\n`;
-    }
+    output += `⚠️ **${alerts.length} active alert${alerts.length === 1 ? '' : 's'} found**\n\n`;
+    output += alerts.map(alert => renderAlert(alert, detail)).join('');
   }
+  output += '\n---\n';
+  output += '*Data source: PAGASA-DOST Common Alerting Protocol (CAP) feed · CC BY 4.0*\n';
 
-  output += `---\n`;
-  output += `*Data source: NOAA National Weather Service*\n`;
-
-  return prependLocationLine({
-    content: [
-      {
-        type: 'text',
-        text: output
-      }
-    ]
-  }, resolved);
+  return prependLocationLine({ content: [{ type: 'text', text: output }] }, resolved);
 }

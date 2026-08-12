@@ -141,7 +141,7 @@ export async function handleSaveLocation(
     if (!results.results || results.results.length === 0) {
       throw new Error(
         `Could not find location "${query}". Please try:\n` +
-        `- Being more specific (e.g., "Seattle, WA, USA" instead of "Seattle")\n` +
+        `- Being more specific (e.g., "Quezon City, Philippines" instead of "Quezon")\n` +
         `- Using a different spelling\n` +
         `- Providing coordinates directly with latitude and longitude parameters`
       );
@@ -278,7 +278,7 @@ export async function handleListSavedLocations(
             `No saved locations yet.\n\n` +
             `Use \`save_location\` to save your favorite locations:\n\n` +
             `\`\`\`\n` +
-            `save_location(alias="home", location_query="Seattle, WA")\n` +
+            `save_location(alias="home", location_query="Makati, Philippines")\n` +
             `save_location(alias="cabin", location_query="Lake Tahoe, CA")\n` +
             `\`\`\`\n\n` +
             `*Storage location: ${locationStore.getStorePath()}*\n`

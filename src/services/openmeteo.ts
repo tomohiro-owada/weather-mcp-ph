@@ -24,7 +24,7 @@ import { validateLatitude, validateLongitude } from '../utils/validation.js';
 import { logger, redactCoordinatesForLogging } from '../utils/logger.js';
 import { computeNormalsFrom30YearData, getNormalsCacheKey } from '../utils/normals.js';
 import { getUserAgent } from '../utils/version.js';
-import { UnitPreferences, IMPERIAL_PREFERENCES } from '../config/units.js';
+import { UnitPreferences, defaultUnitPreferences } from '../config/units.js';
 import { openMeteoUnitParams } from '../utils/unitFormat.js';
 import {
   RateLimitError,
@@ -364,7 +364,7 @@ export class OpenMeteoService {
     startDate: string,
     endDate: string,
     useHourly: boolean = true,
-    prefs: UnitPreferences = IMPERIAL_PREFERENCES
+    prefs: UnitPreferences = defaultUnitPreferences
   ): Promise<OpenMeteoHistoricalResponse> {
     // Validate coordinates (checks for NaN, Infinity, and range)
     validateLatitude(latitude);
@@ -407,7 +407,7 @@ export class OpenMeteoService {
     startDate: string,
     endDate: string,
     useHourly: boolean,
-    prefs: UnitPreferences = IMPERIAL_PREFERENCES
+    prefs: UnitPreferences = defaultUnitPreferences
   ): Record<string, string | number> {
     const params: Record<string, string | number> = {
       latitude,
@@ -610,7 +610,7 @@ export class OpenMeteoService {
     longitude: number,
     days: number = 7,
     hourly: boolean = false,
-    prefs: UnitPreferences = IMPERIAL_PREFERENCES
+    prefs: UnitPreferences = defaultUnitPreferences
   ): Promise<OpenMeteoForecastResponse> {
     // Validate coordinates
     validateLatitude(latitude);
@@ -661,7 +661,7 @@ export class OpenMeteoService {
   async getCurrentConditions(
     latitude: number,
     longitude: number,
-    prefs: UnitPreferences = IMPERIAL_PREFERENCES
+    prefs: UnitPreferences = defaultUnitPreferences
   ): Promise<OpenMeteoForecastResponse> {
     // Validate coordinates
     validateLatitude(latitude);
@@ -700,7 +700,7 @@ export class OpenMeteoService {
   private buildCurrentParams(
     latitude: number,
     longitude: number,
-    prefs: UnitPreferences = IMPERIAL_PREFERENCES
+    prefs: UnitPreferences = defaultUnitPreferences
   ): Record<string, string | number> {
     const params: Record<string, string | number> = {
       latitude,
@@ -762,7 +762,7 @@ export class OpenMeteoService {
     longitude: number,
     days: number,
     hourly: boolean,
-    prefs: UnitPreferences = IMPERIAL_PREFERENCES
+    prefs: UnitPreferences = defaultUnitPreferences
   ): Record<string, string | number> {
     const params: Record<string, string | number> = {
       latitude,

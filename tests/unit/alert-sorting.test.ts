@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-// Mock alert data structure based on NOAA types
+// Alert sorting is source-independent.
 interface AlertFeature {
   properties: {
     event: string;

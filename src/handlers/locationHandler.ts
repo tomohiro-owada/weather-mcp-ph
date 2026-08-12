@@ -118,7 +118,7 @@ export async function handleSearchLocation(
   }
 
   output += `---\n`;
-  output += `*Multi-service geocoding with automatic fallback (Census.gov, Nominatim, Open-Meteo)*\n`;
+  output += `*Global geocoding with automatic fallback (Nominatim, Open-Meteo)*\n`;
 
   return {
     content: [
@@ -135,7 +135,6 @@ export async function handleSearchLocation(
  */
 function getSourceName(source: string): string {
   switch (source) {
-    case 'census': return 'US Census Bureau';
     case 'nominatim': return 'OpenStreetMap Nominatim';
     case 'openmeteo': return 'Open-Meteo';
     default: return source;

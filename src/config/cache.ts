@@ -83,7 +83,7 @@ export const CacheConfig = {
     stations: 24 * HOUR,
 
     // 7-day forecasts
-    // NOAA updates forecasts approximately hourly
+    // Open-Meteo updates forecasts regularly; cache for one hour.
     forecast: 2 * HOUR,
 
     // Current weather conditions

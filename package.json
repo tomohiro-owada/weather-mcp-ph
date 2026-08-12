@@ -1,12 +1,12 @@
 {
-  "name": "@dangahagan/weather-mcp",
-  "version": "1.13.0",
-  "description": "MCP server giving AI assistants 17 weather tools with zero API keys: global forecasts, current conditions, alerts, air quality, marine conditions, lightning detection, radar imagery, river levels, wildfire tracking, and historical weather back to 1940. Built entirely on free public APIs (NOAA, Open-Meteo, USGS, NIFC).",
-  "mcpName": "io.github.dgahagan/weather-mcp",
+  "name": "weather-mcp-ph",
+  "version": "0.1.0",
+  "description": "Philippines-focused MCP weather server using PAGASA, Open-Meteo, NASA GIBS/FIRMS, RainViewer, and Blitzortung.",
+  "mcpName": "io.github.tomohiro-owada/weather-mcp-ph",
   "main": "dist/index.js",
   "type": "module",
   "bin": {
-    "weather-mcp": "dist/index.js"
+    "weather-mcp-ph": "dist/index.js"
   },
   "files": [
     "dist",
@@ -26,8 +26,7 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
     "audit": "npm audit --audit-level=moderate",
-    "audit:fix": "npm audit fix",
-    "stress": "node scripts/stress-harness.mjs"
+    "audit:fix": "npm audit fix"
   },
   "keywords": [
     "mcp",
@@ -36,7 +35,8 @@
     "weather",
     "weather-api",
     "weather-forecast",
-    "noaa",
+    "pagasa",
+    "philippines",
     "open-meteo",
     "forecast",
     "climate",
@@ -48,7 +48,6 @@
     "weather-radar",
     "wildfire",
     "geocoding",
-    "no-api-key",
     "free",
     "claude",
     "claude-code",
@@ -57,20 +56,21 @@
     "llm",
     "ai-tools"
   ],
-  "author": "Dan Gahagan",
+  "author": "Tomohiro Owada; based on Weather MCP by Dan Gahagan",
   "license": "MIT",
-  "homepage": "https://github.com/weather-mcp/weather-mcp#readme",
+  "homepage": "https://github.com/tomohiro-owada/weather-mcp-ph#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/weather-mcp/weather-mcp.git"
+    "url": "git+https://github.com/tomohiro-owada/weather-mcp-ph.git"
   },
   "bugs": {
-    "url": "https://github.com/weather-mcp/weather-mcp/issues"
+    "url": "https://github.com/tomohiro-owada/weather-mcp-ph/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.1",
     "axios": "^1.13.1",
     "dotenv": "^17.2.3",
+    "fast-xml-parser": "^5.10.1",
     "luxon": "^3.7.2",
     "mqtt": "^5.14.1",
     "ngeohash": "^0.6.3",

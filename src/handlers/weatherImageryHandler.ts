@@ -99,7 +99,7 @@ export async function getWeatherImagery(params: WeatherImageryParams): Promise<W
     animated
   });
 
-  // Precipitation/radar via RainViewer (global); satellite via NASA GIBS GOES.
+  // Precipitation/radar via RainViewer; satellite via NASA GIBS Himawari-9.
   switch (type) {
     case 'precipitation':
     case 'radar': {
@@ -119,7 +119,7 @@ export async function getWeatherImagery(params: WeatherImageryParams): Promise<W
     }
 
     case 'satellite': {
-      // NOAA GOES-East/West ABI GeoColor via NASA GIBS (Western Hemisphere).
+      // Himawari-9 AHI clean infrared via NASA GIBS (Philippines/western Pacific).
       // Satellite returns the latest snapshot only (no animation — GIBS sub-daily
       // timestamps are irregular; use type="radar" for animated loops).
       const frames = gibsService.getSatelliteImagery(latitude, longitude);
@@ -127,13 +127,13 @@ export async function getWeatherImagery(params: WeatherImageryParams): Promise<W
       return {
         type,
         location: { latitude, longitude },
-        coverage: 'Western Hemisphere (Americas / eastern Pacific)',
+        coverage: 'Philippines and western Pacific',
         resolution: 'Latest snapshot',
-        source: 'NASA GIBS (NOAA GOES GeoColor)',
+        source: 'NASA GIBS (Himawari-9 AHI)',
         animated: false,
         frames,
         generatedAt: new Date(),
-        disclaimer: 'Satellite imagery from NASA GIBS using NOAA GOES-East/West ABI GeoColor. Coverage is the Western Hemisphere; locations outside GOES range may appear blank. Shows the latest snapshot only (animation not available for satellite). Imagery has a processing delay of roughly 20-30 minutes.'
+        disclaimer: 'Satellite imagery from NASA GIBS using Himawari-9 AHI clean infrared. Intended for the Philippines and western Pacific. Shows the latest snapshot only; animation is not available for satellite.'
       };
     }
 

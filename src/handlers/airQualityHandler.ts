@@ -12,8 +12,7 @@ import {
   getEuropeanAQICategory,
   getUVIndexCategory,
   getPollutantInfo,
-  formatPollutantConcentration,
-  shouldUseUSAQI
+  formatPollutantConcentration
 } from '../utils/airQuality.js';
 import type { OpenMeteoAirQualityResponse, OpenMeteoAirQualityHourlyData } from '../types/openmeteo.js';
 
@@ -84,8 +83,9 @@ function formatAirQuality(
   output += `**Elevation:** ${Math.round(data.elevation)}m\n`;
   output += `\n`;
 
-  // Determine which AQI to show primarily based on location
-  const useUSAQI = shouldUseUSAQI(latitude, longitude);
+  // US AQI is widely understood in the Philippines. European AQI is retained
+  // as a secondary reference when Open-Meteo provides it.
+  const useUSAQI = true;
 
   if (!data.current) {
     output += `⚠️ **No current air quality data available for this location.**\n`;

@@ -1,13 +1,13 @@
 /**
  * Unit / localization configuration for weather output.
  *
- * The server defaults to imperial units (preserving historical behavior for
- * existing users). A server-wide default can be set via environment variables,
+ * The Philippines edition defaults to metric units. A server-wide default can
+ * be set via environment variables,
  * and individual tool calls may override it per request (see
  * `src/utils/unitPreferences.ts`).
  *
  * Environment variables:
- *   WEATHER_UNITS              imperial | metric            (default: imperial)
+ *   WEATHER_UNITS              imperial | metric            (default: metric)
  *   WEATHER_TEMPERATURE_UNIT   F | C                        (override)
  *   WEATHER_WIND_SPEED_UNIT    mph | kmh | ms | kn          (override)
  *   WEATHER_PRECIPITATION_UNIT inch | mm                    (override)
@@ -37,7 +37,7 @@ export interface UnitPreferences {
   timeFormat: TimeFormat;
 }
 
-/** Imperial preset — the historical default. */
+/** Imperial preset. */
 export const IMPERIAL_PREFERENCES: UnitPreferences = {
   temperature: 'F',
   windSpeed: 'mph',
@@ -134,7 +134,7 @@ function envOverride<K extends keyof typeof NORMALIZERS>(
  * Build the server-wide default preferences from the environment.
  */
 function loadUnitPreferences(): UnitPreferences {
-  const system = envOverride('system', 'WEATHER_UNITS') ?? 'imperial';
+  const system = envOverride('system', 'WEATHER_UNITS') ?? 'metric';
   const base = systemPreferences(system);
 
   return {

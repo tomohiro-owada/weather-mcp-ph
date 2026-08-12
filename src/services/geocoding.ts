@@ -50,7 +50,7 @@ export interface GeocodingResult {
   population?: number;
   feature_code?: string;
   confidence: 'high' | 'medium' | 'low';
-  source: 'census' | 'nominatim' | 'openmeteo';
+  source: 'nominatim' | 'openmeteo';
 }
 
 /**
@@ -86,96 +86,6 @@ class RateLimiter {
 }
 
 /**
- * Census.gov Geocoding Provider
- * Best for: US locations (cities, states, addresses)
- * Coverage: United States only
- * Rate limit: No strict limit (but we throttle to be respectful)
- */
-class CensusGovProvider implements GeocodingProvider {
-  name = 'Census.gov';
-  private client: AxiosInstance;
-  private rateLimiter: RateLimiter;
-
-  constructor() {
-    this.client = axios.create({
-      baseURL: 'https://geocoding.geo.census.gov/geocoder',
-      timeout: 10000,
-      headers: {
-        'Accept': 'application/json'
-      },
-      paramsSerializer: { serialize: rfc3986ParamsSerializer }
-    });
-
-    // Rate limit to 5 requests/second to be respectful
-    this.rateLimiter = new RateLimiter(5);
-  }
-
-  async geocode(query: string, limit: number): Promise<GeocodingResult[]> {
-    await this.rateLimiter.throttle();
-
-    try {
-      logger.debug(`Census.gov geocode: "${query}"`);
-
-      const response = await this.client.get('/locations/onelineaddress', {
-        params: {
-          address: query,
-          benchmark: 'Public_AR_Current',
-          format: 'json'
-        }
-      });
-
-      if (!response.data?.result?.addressMatches || response.data.result.addressMatches.length === 0) {
-        logger.debug('Census.gov: No results found');
-        return [];
-      }
-
-      const matches = response.data.result.addressMatches;
-      const results: GeocodingResult[] = [];
-
-      for (let i = 0; i < Math.min(matches.length, limit); i++) {
-        const match = matches[i];
-        const coords = match.coordinates;
-
-        if (!coords || coords.x === undefined || coords.y === undefined) {
-          continue;
-        }
-
-        // Census.gov uses longitude, latitude (x, y) order
-        const result: GeocodingResult = {
-          name: match.matchedAddress || query,
-          display_name: match.matchedAddress || query,
-          latitude: coords.y,
-          longitude: coords.x,
-          country: 'United States',
-          country_code: 'US',
-          admin1: match.addressComponents?.state,
-          admin2: match.addressComponents?.county,
-          confidence: 'high', // Census.gov is authoritative for US locations
-          source: 'census'
-        };
-
-        results.push(result);
-      }
-
-      logger.debug(`Census.gov: Found ${results.length} result(s)`);
-      return results;
-
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        if (error.code === 'ECONNABORTED') {
-          throw new ServiceUnavailableError('OpenMeteo', 'Census.gov geocoding service timed out');
-        }
-        if (error.response?.status === 429) {
-          throw new RateLimitError('OpenMeteo', 'Census.gov geocoding rate limit exceeded');
-        }
-      }
-      logger.debug(`Census.gov error: ${error instanceof Error ? error.message : 'Unknown'}`);
-      return []; // Return empty array for fallback
-    }
-  }
-}
-
-/**
  * Nominatim (OpenStreetMap) Provider
  * Best for: Worldwide locations, landmarks, natural language queries
  * Coverage: Global
@@ -191,7 +101,7 @@ class NominatimProvider implements GeocodingProvider {
       baseURL: 'https://nominatim.openstreetmap.org',
       timeout: 10000,
       headers: {
-        'User-Agent': '(weather-mcp, github.com/weather-mcp/weather-mcp)',
+        'User-Agent': 'weather-mcp-ph (github.com/tomohiro-owada/weather-mcp-ph)',
         'Accept': 'application/json'
       },
       paramsSerializer: { serialize: rfc3986ParamsSerializer }
@@ -365,92 +275,26 @@ class OpenMeteoProvider implements GeocodingProvider {
  * Automatically tries multiple providers in order with intelligent fallback
  */
 export class GeocodingService {
-  private census: CensusGovProvider;
   private nominatim: NominatimProvider;
   private openmeteo: OpenMeteoProvider;
 
   constructor() {
-    this.census = new CensusGovProvider();
     this.nominatim = new NominatimProvider();
     this.openmeteo = new OpenMeteoProvider();
   }
 
   /**
-   * Detect if query is likely a US location
-   * Helps optimize provider selection
-   */
-  private isLikelyUSLocation(query: string): boolean {
-    const lowerQuery = query.toLowerCase();
-
-    // State abbreviations
-    const stateAbbreviations = [
-      'al', 'ak', 'az', 'ar', 'ca', 'co', 'ct', 'de', 'fl', 'ga',
-      'hi', 'id', 'il', 'in', 'ia', 'ks', 'ky', 'la', 'me', 'md',
-      'ma', 'mi', 'mn', 'ms', 'mo', 'mt', 'ne', 'nv', 'nh', 'nj',
-      'nm', 'ny', 'nc', 'nd', 'oh', 'ok', 'or', 'pa', 'ri', 'sc',
-      'sd', 'tn', 'tx', 'ut', 'vt', 'va', 'wa', 'wv', 'wi', 'wy'
-    ];
-
-    // Check for state abbreviations (e.g., "Seattle, WA")
-    for (const state of stateAbbreviations) {
-      if (lowerQuery.includes(`, ${state}`) || lowerQuery.endsWith(` ${state}`)) {
-        return true;
-      }
-    }
-
-    // Check for explicit country mentions (US or USA)
-    if (lowerQuery.includes('usa') ||
-        lowerQuery.includes('u.s.a') ||
-        lowerQuery.includes('united states')) {
-      return true;
-    }
-
-    // Check for explicit non-US country mentions
-    const nonUSKeywords = [
-      'france', 'germany', 'japan', 'china', 'uk', 'england',
-      'canada', 'mexico', 'australia', 'india', 'brazil'
-    ];
-
-    for (const keyword of nonUSKeywords) {
-      if (lowerQuery.includes(keyword)) {
-        return false;
-      }
-    }
-
-    // Default: Assume might be US (we'll try Census.gov first, then fallback)
-    return null as any; // null means "uncertain"
-  }
-
-  /**
    * Geocode a location query with automatic multi-service fallback
    *
-   * Strategy:
-   * 1. If likely US: Try Census.gov first (fast, authoritative)
-   * 2. Try Nominatim (worldwide, good natural language support)
-   * 3. Fallback to Open-Meteo (reliable, detailed metadata)
+   * Strategy: try Nominatim first, then Open-Meteo as a global fallback.
    *
-   * @param query - Location search query (e.g., "Seattle, WA", "Paris, France")
+   * @param query - Location search query (e.g., "Manila", "Cebu City")
    * @param limit - Maximum number of results to return
    * @returns Array of geocoding results from first successful provider
    */
   async geocode(query: string, limit: number = 5): Promise<GeocodingResult[]> {
-    const isLikelyUS = this.isLikelyUSLocation(query);
-    const providers: GeocodingProvider[] = [];
-
-    // Build provider order based on query characteristics
-    if (isLikelyUS === true) {
-      // Definitely US - try Census.gov first
-      providers.push(this.census, this.nominatim, this.openmeteo);
-      logger.debug('Provider strategy: US-optimized (Census → Nominatim → Open-Meteo)');
-    } else if (isLikelyUS === false) {
-      // Definitely non-US - skip Census.gov
-      providers.push(this.nominatim, this.openmeteo);
-      logger.debug('Provider strategy: International (Nominatim → Open-Meteo)');
-    } else {
-      // Uncertain - try all providers
-      providers.push(this.census, this.nominatim, this.openmeteo);
-      logger.debug('Provider strategy: Uncertain (Census → Nominatim → Open-Meteo)');
-    }
+    const providers: GeocodingProvider[] = [this.nominatim, this.openmeteo];
+    logger.debug('Provider strategy: Global (Nominatim → Open-Meteo)');
 
     const errors: string[] = [];
 
@@ -500,9 +344,8 @@ export class GeocodingService {
    */
   getServiceInfo(): string {
     return `Multi-Service Geocoding:\n` +
-           `- Census.gov (US locations, high accuracy)\n` +
            `- Nominatim/OpenStreetMap (worldwide, 1 req/sec limit)\n` +
            `- Open-Meteo (worldwide fallback)\n` +
-           `Automatic fallback strategy based on query characteristics`;
+           `Automatic global fallback strategy`;
   }
 }

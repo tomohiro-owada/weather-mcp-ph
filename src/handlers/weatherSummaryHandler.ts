@@ -8,14 +8,11 @@
  * sub-handler so there is no repeated geocoding.
  */
 
-import { NOAAService } from '../services/noaa.js';
 import { OpenMeteoService } from '../services/openmeteo.js';
-import { NCEIService } from '../services/ncei.js';
 import { LocationStore } from '../services/locationStore.js';
 import { GeocodingService } from '../services/geocoding.js';
 import { resolveLocationAsync, formatLocationLine } from '../utils/locationResolver.js';
 import { validateDetail, validateForecastDays, DetailLevel } from '../utils/validation.js';
-import { isInUS } from '../utils/geography.js';
 import { logger } from '../utils/logger.js';
 import { handleGetCurrentConditions } from './currentConditionsHandler.js';
 import { handleGetForecast } from './forecastHandler.js';
@@ -82,9 +79,7 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): str
 
 export async function handleGetWeatherSummary(
   args: unknown,
-  noaaService: NOAAService,
   openMeteoService: OpenMeteoService,
-  nceiService: NCEIService,
   locationStore: LocationStore,
   geocodingService: GeocodingService
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
@@ -118,34 +113,24 @@ export async function handleGetWeatherSummary(
   body += `**Includes:** ${include.join(', ')}\n\n`;
   body += `---\n\n`;
 
-  // Run each requested section. A section failure (e.g. alerts outside the US)
+  // Run each requested section. A section failure
   // degrades to a note instead of failing the whole summary.
   for (const section of include) {
-    // Alerts are US-only; skip the doomed NOAA round-trip for non-US locations
-    // and note that plainly instead of letting it degrade to the generic
-    // "(unavailable)" error block with a leaked NOAA message.
-    if (section === 'alerts' && !isInUS(resolved.latitude, resolved.longitude)) {
-      body += `## Alerts\n\n`;
-      body += `Weather alerts are currently available for US locations only.\n\n`;
-      body += `---\n\n`;
-      continue;
-    }
-
     try {
       let sectionResult: { content: Array<{ type: string; text: string }> };
       switch (section) {
         case 'current':
           sectionResult = await handleGetCurrentConditions(
-            subArgs, noaaService, openMeteoService, nceiService, locationStore, geocodingService
+            subArgs, openMeteoService, locationStore, geocodingService
           );
           break;
         case 'forecast':
           sectionResult = await handleGetForecast(
-            { ...subArgs, days }, noaaService, openMeteoService, locationStore, geocodingService, nceiService
+            { ...subArgs, days }, openMeteoService, locationStore, geocodingService
           );
           break;
         case 'alerts':
-          sectionResult = await handleGetAlerts(subArgs, noaaService, locationStore, geocodingService);
+          sectionResult = await handleGetAlerts(subArgs, locationStore, geocodingService);
           break;
         case 'air_quality':
           sectionResult = await handleGetAirQuality(subArgs, openMeteoService, locationStore, geocodingService);

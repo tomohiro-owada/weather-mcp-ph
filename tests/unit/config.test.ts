@@ -238,7 +238,7 @@ describe('Cache Configuration', () => {
       expect(CacheConfig.apiTimeoutMs).toBeLessThanOrEqual(120000);
     });
 
-    it('should use API timeout in both NOAA and OpenMeteo services', () => {
+    it('should expose the shared API timeout', () => {
       // This verifies the configuration exists
       expect(CacheConfig).toHaveProperty('apiTimeoutMs');
       expect(typeof CacheConfig.apiTimeoutMs).toBe('number');
@@ -269,7 +269,7 @@ describe('Cache Configuration', () => {
 
     it('should be used for all API client configurations', () => {
       // The timeout should be configurable and used consistently
-      // across both NOAA and OpenMeteo services
+      // across upstream API services
       const timeout = CacheConfig.apiTimeoutMs;
 
       expect(timeout).toBeGreaterThan(0);

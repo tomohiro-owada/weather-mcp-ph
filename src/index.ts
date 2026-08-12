@@ -2,7 +2,7 @@
 
 /**
  * Weather MCP Server
- * Provides weather data from NOAA API to AI systems via Model Context Protocol
+ * Philippines-focused weather data via Model Context Protocol
  */
 
 // Load environment variables from .env file (for local development)
@@ -14,11 +14,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { NOAAService } from './services/noaa.js';
 import { OpenMeteoService } from './services/openmeteo.js';
 import { NominatimService } from './services/nominatim.js';
-import { NCEIService } from './services/ncei.js';
-import { NIFCService } from './services/nifc.js';
 import { GeocodingService } from './services/geocoding.js';
 import { LocationStore } from './services/locationStore.js';
 import { blitzortungService } from './services/blitzortung.js';
@@ -61,7 +58,7 @@ const packageJson = JSON.parse(
   readFileSync(join(__dirname, '../package.json'), 'utf-8')
 );
 
-const SERVER_NAME = 'weather-mcp';
+const SERVER_NAME = 'weather-mcp-ph';
 const SERVER_VERSION = packageJson.version;
 
 /**
@@ -94,13 +91,6 @@ function redactSensitiveFields(args: unknown): unknown {
 }
 
 /**
- * Initialize the NOAA service
- */
-const noaaService = new NOAAService({
-  userAgent: `weather-mcp/${SERVER_VERSION} (https://github.com/weather-mcp/weather-mcp)`
-});
-
-/**
  * Initialize the Open-Meteo service for historical data
  * No API key required - free for non-commercial use
  */
@@ -122,21 +112,8 @@ const nominatimService = new NominatimService();
 const locationStore = new LocationStore();
 
 /**
- * Initialize the NCEI service for climate normals (optional)
- * Requires free API token from https://www.ncdc.noaa.gov/cdo-web/token
- * Falls back to Open-Meteo computed normals if not configured
- */
-const nceiService = new NCEIService();
-
-/**
- * Initialize the NIFC service for wildfire data
- * No API key required - uses public ArcGIS REST API
- */
-const nifcService = new NIFCService();
-
-/**
  * Initialize the Geocoding service with multi-provider support
- * No API key required - uses Census.gov, Nominatim, and Open-Meteo
+ * No API key required - uses Nominatim and Open-Meteo
  * Automatic fallback strategy for maximum reliability
  */
 const geocodingService = new GeocodingService();
@@ -159,12 +136,12 @@ const server = new Server(
 /**
  * Shared unit / localization parameters. Spread into weather tools so the AI can
  * request output units per call. Omitting them falls back to the server default
- * (WEATHER_UNITS env, default imperial).
+ * (WEATHER_UNITS env, default metric).
  */
 const UNIT_SCHEMA_PROPERTIES = {
   units: {
     type: 'string' as const,
-    description: 'Unit system for output: "imperial" (°F, mph, inHg) or "metric" (°C, km/h, hPa). Defaults to the server setting (imperial unless configured otherwise). Individual *_unit overrides below take precedence.',
+    description: 'Unit system for output: "metric" (°C, km/h, hPa) or "imperial" (°F, mph, inHg). Defaults to metric. Individual *_unit overrides below take precedence.',
     enum: ['imperial', 'metric']
   },
   temperature_unit: {
@@ -246,14 +223,14 @@ const DETAIL_SCHEMA_PROPERTY = {
 const TOOL_DEFINITIONS = {
   get_forecast: {
     name: 'get_forecast' as const,
-    description: 'Get future weather forecast for a location (global coverage). Use this for upcoming weather predictions (e.g., "tomorrow", "this week", "next 7 days", "hourly forecast"). Returns forecast data including temperature, precipitation, wind, conditions, and sunrise/sunset times. Supports both daily and hourly granularity. Automatically selects best data source: NOAA for US locations (more detailed), Open-Meteo for international locations. For current weather, use get_current_conditions. For past weather, use get_historical_weather. Provide the location in ONE of three ways: coordinates (latitude+longitude), a saved location name (location_name="home"), or a free-text city name (city_name="Paris, France") which is geocoded automatically. If this tool returns an error, check the error message for status page links and consider using check_service_status to verify API availability.',
+    description: 'Get an Open-Meteo weather forecast for a location, with up to 16 days of daily or hourly data. Includes temperature, precipitation, wind, conditions, UV, and sunrise/sunset. Provide coordinates, a saved location_name, or a free-text city_name such as "Manila".',
     inputSchema: {
       type: 'object' as const,
       properties: {
         ...LOCATION_SCHEMA_PROPERTIES,
         days: {
           type: 'number' as const,
-          description: 'Number of days to include in forecast (1-16 for global, 1-7 for US NOAA, default: 7)',
+          description: 'Number of days to include in forecast (1-16, default: 7)',
           minimum: 1,
           maximum: 16,
           default: 7
@@ -269,21 +246,10 @@ const TOOL_DEFINITIONS = {
           description: 'Include precipitation probability in the forecast output (default: true)',
           default: true
         },
-        include_severe_weather: {
-          type: 'boolean' as const,
-          description: 'Include severe weather probabilities such as thunderstorm chance, wind gust probabilities, and tropical storm/hurricane risks (default: false, US/NOAA only)',
-          default: false
-        },
         include_normals: {
           type: 'boolean' as const,
           description: 'Include climate normals (30-year averages) for comparison with forecasted temperatures (default: false, daily forecasts only). Shows normal high/low and departure from normal for the first forecast day.',
           default: false
-        },
-        source: {
-          type: 'string' as const,
-          description: 'Data source: "auto" (default, selects NOAA for US or Open-Meteo for international), "noaa" (US only), or "openmeteo" (global)',
-          enum: ['auto', 'noaa', 'openmeteo'],
-          default: 'auto'
         },
         ...DETAIL_SCHEMA_PROPERTY,
         ...UNIT_SCHEMA_PROPERTIES
@@ -294,26 +260,15 @@ const TOOL_DEFINITIONS = {
 
   get_current_conditions: {
     name: 'get_current_conditions' as const,
-    description: 'Get the most recent weather observation for a location (global coverage). Use this for current weather or when asking about "today\'s weather", "right now", or recent conditions without a specific historical date range. Returns NOAA station observations for US locations and Open-Meteo model data for international locations. Optionally includes fire weather indices (Haines Index, Grassland Fire Danger, Red Flag Threat) when requested. Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. For specific past dates or date ranges, use get_historical_weather instead. If this tool returns an error, check the error message for status page links and consider using check_service_status to verify API availability.',
+    description: 'Get current Open-Meteo model conditions including temperature, apparent temperature, wind, humidity, pressure, precipitation, and cloud cover. Provide coordinates, a saved location_name, or a free-text city_name.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         ...LOCATION_SCHEMA_PROPERTIES,
-        include_fire_weather: {
-          type: 'boolean' as const,
-          description: 'Include fire weather indices (Haines Index, Grassland Fire Danger, Red Flag Threat) in the response (default: false, US only)',
-          default: false
-        },
         include_normals: {
           type: 'boolean' as const,
           description: 'Include climate normals (30-year averages) for comparison with current conditions (default: false). Shows normal high/low temperatures and precipitation, with departure from normal.',
           default: false
-        },
-        source: {
-          type: 'string' as const,
-          description: 'Data source: "auto" (default, selects NOAA for US or Open-Meteo for international), "noaa" (US only), or "openmeteo" (global)',
-          enum: ['auto', 'noaa', 'openmeteo'],
-          default: 'auto'
         },
         ...UNIT_SCHEMA_PROPERTIES
       },
@@ -323,7 +278,7 @@ const TOOL_DEFINITIONS = {
 
   get_alerts: {
     name: 'get_alerts' as const,
-    description: 'Get active weather alerts, watches, warnings, and advisories for a location (US only). Use this for safety-critical weather information when asked about "any alerts?", "weather warnings?", "is it safe?", "dangerous weather?", or "weather watches?". Returns severity, urgency, certainty, effective/expiration times, and affected areas. Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. For forecast data, use get_forecast instead. If this tool returns an error, check the error message for status page links and consider using check_service_status to verify API availability.',
+    description: 'Get active PAGASA-DOST alerts for a location in the Philippines from the official CAP feed. Returns severity, urgency, certainty, validity times, affected areas, and safety instructions.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -341,7 +296,7 @@ const TOOL_DEFINITIONS = {
 
   get_historical_weather: {
     name: 'get_historical_weather' as const,
-    description: 'Get historical weather data for a specific date range in the past. Use this when the user asks about weather on specific past dates (e.g., "yesterday", "last week", "November 4, 2024", "30 years ago"). Automatically uses NOAA API for recent dates (last 7 days, US only) or Open-Meteo API for older dates (worldwide, back to 1940). Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. Do NOT use for current conditions - use get_current_conditions instead. If this tool returns an error, check the error message for status page links and consider using check_service_status to verify API availability.',
+    description: 'Get Open-Meteo historical weather for a past date range, with coverage back to 1940. Provide coordinates, a saved location_name, or a free-text city_name. Use get_current_conditions for current weather.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -369,7 +324,7 @@ const TOOL_DEFINITIONS = {
 
   get_weather_summary: {
     name: 'get_weather_summary' as const,
-    description: 'Get a combined weather overview for a location in a SINGLE call. Best for broad questions like "What\'s the weather like in Seattle?", "Is it safe to hike today?", or "Give me a weather rundown". Aggregates current conditions, forecast, and active alerts by default, and can also include air quality and lightning. Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. For a single specific data product (just the forecast, just alerts, etc.), call that specialized tool directly. Sections that are unavailable for a location (e.g. US-only alerts abroad) are noted rather than failing the whole summary.',
+    description: 'Get a combined overview with current conditions, forecast, and PAGASA alerts in one call. Air quality and lightning can be added. Best for broad questions such as "What is the weather in Manila?".',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -398,7 +353,7 @@ const TOOL_DEFINITIONS = {
 
   check_service_status: {
     name: 'check_service_status' as const,
-    description: 'Check the operational status of the NOAA and Open-Meteo weather APIs. Use this when experiencing errors or to proactively verify service availability before making weather data requests. Returns current status, helpful messages, and links to official status pages.',
+    description: 'Check Open-Meteo and PAGASA upstream availability and report local cache statistics.',
     inputSchema: {
       type: 'object' as const,
       properties: {},
@@ -430,7 +385,7 @@ const TOOL_DEFINITIONS = {
 
   get_air_quality: {
     name: 'get_air_quality' as const,
-    description: 'Get air quality data including AQI (Air Quality Index), pollutant concentrations, and UV index for a location (global coverage). Use this when asked about "air quality", "pollution", "AQI", "UV index", "safe to exercise outside", or health-related environmental conditions. Returns current conditions and an optional forecast grouped by day (up to 7 days / 168 hours via forecast_days). Shows appropriate AQI scale (US AQI for US locations, European EAQI elsewhere) with health recommendations. Pollutants include PM2.5, PM10, ozone, NO2, SO2, and CO. Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name.',
+    description: 'Get Open-Meteo air quality data including US AQI, European AQI, pollutants, UV index, health guidance, and an optional forecast of up to 7 days.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -478,14 +433,14 @@ const TOOL_DEFINITIONS = {
 
   get_weather_imagery: {
     name: 'get_weather_imagery' as const,
-    description: 'Get weather imagery including radar, satellite, and precipitation maps for a location. Use this when asked about "show radar", "satellite image", "precipitation map", "weather map", "animated radar", or "what does radar show". Returns image URLs with timestamps for current or animated weather visualization. Precipitation/radar is global via RainViewer; satellite is GOES GeoColor (Western Hemisphere) via NASA GIBS. By default returns direct image URLs; use detail="full" to embed Markdown images and list every animation frame (lower detail levels show 3 representative frames of longer animations). Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. For numerical forecast data, use get_forecast instead.',
+    description: 'Get RainViewer precipitation imagery or Himawari-9 infrared satellite imagery via NASA GIBS. Returns timestamped image URLs and optional animation frames.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         ...LOCATION_SCHEMA_PROPERTIES,
         type: {
           type: 'string' as const,
-          description: 'Type of imagery: "radar" or "precipitation" (global, RainViewer) or "satellite" (Western Hemisphere GOES GeoColor, NASA GIBS). Default: "precipitation"',
+          description: 'Type of imagery: "radar" or "precipitation" (RainViewer), or "satellite" (Himawari-9 infrared via NASA GIBS).',
           enum: ['radar', 'satellite', 'precipitation'],
           default: 'precipitation'
         },
@@ -529,7 +484,7 @@ const TOOL_DEFINITIONS = {
 
   get_river_conditions: {
     name: 'get_river_conditions' as const,
-    description: 'Monitor river levels and flood status for a location (US only). Use this when asked about "river flooding", "river level", "flood stage", "streamflow", "safe to kayak", or "river conditions". Returns current river gauge data within specified radius including river stage, flow rate, flood category levels (action/minor/moderate/major), and forecasted conditions. Provides safety assessment based on flood stages. Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. SAFETY-CRITICAL tool for flood-prone areas and water recreation.',
+    description: 'Get nearby PAGASA hydromet water-level observations and Open-Meteo/GloFAS river-discharge forecasts for the Philippines. This is situational information, not a substitute for official flood warnings.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -549,7 +504,7 @@ const TOOL_DEFINITIONS = {
 
   get_wildfire_info: {
     name: 'get_wildfire_info' as const,
-    description: 'Monitor active wildfires and fire perimeters for a location (US focus). Use this when asked about "wildfires nearby", "fire danger", "active fires", "wildfire smoke", "fire perimeters", or "evacuation risk". Returns active wildfire information within specified radius including fire name, size, containment percentage, distance from location, and safety assessment. Provides critical evacuation awareness and air quality impact information. Provide the location as coordinates (latitude+longitude), a saved location_name, or a free-text city_name. SAFETY-CRITICAL tool for wildfire-prone areas.',
+    description: 'Find recent NASA FIRMS satellite heat anomalies near a location. Requires FIRMS_MAP_KEY. Detections are not confirmed wildfires and do not include containment or evacuation status.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -580,7 +535,7 @@ const TOOL_DEFINITIONS = {
         },
         location_query: {
           type: 'string' as const,
-          description: 'Location to geocode and save (e.g., "Seattle, WA", "Paris, France", "Lake Tahoe, CA"). Will be geocoded using Nominatim. Not required if latitude/longitude provided.'
+          description: 'Location to geocode and save (e.g., "Manila" or "Cebu City"). Not required if latitude/longitude is provided.'
         },
         latitude: {
           type: 'number' as const,
@@ -596,7 +551,7 @@ const TOOL_DEFINITIONS = {
         },
         name: {
           type: 'string' as const,
-          description: 'Display name for the location (required when using latitude/longitude). E.g., "My Home in Seattle"'
+          description: 'Display name for the location (required when using latitude/longitude), e.g. "Home in Makati".'
         },
         description: {
           type: 'string' as const,
@@ -695,32 +650,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case 'get_forecast':
         return await withAnalytics('get_forecast', async () =>
-          handleGetForecast(args, noaaService, openMeteoService, locationStore, geocodingService, nceiService)
+          handleGetForecast(args, openMeteoService, locationStore, geocodingService)
         );
 
       case 'get_current_conditions':
         return await withAnalytics('get_current_conditions', async () =>
-          handleGetCurrentConditions(args, noaaService, openMeteoService, nceiService, locationStore, geocodingService)
+          handleGetCurrentConditions(args, openMeteoService, locationStore, geocodingService)
         );
 
       case 'get_alerts':
         return await withAnalytics('get_alerts', async () =>
-          handleGetAlerts(args, noaaService, locationStore, geocodingService)
+          handleGetAlerts(args, locationStore, geocodingService)
         );
 
       case 'get_historical_weather':
         return await withAnalytics('get_historical_weather', async () =>
-          handleGetHistoricalWeather(args, noaaService, openMeteoService, locationStore, geocodingService)
+          handleGetHistoricalWeather(args, openMeteoService, locationStore, geocodingService)
         );
 
       case 'get_weather_summary':
         return await withAnalytics('get_weather_summary', async () =>
-          handleGetWeatherSummary(args, noaaService, openMeteoService, nceiService, locationStore, geocodingService)
+          handleGetWeatherSummary(args, openMeteoService, locationStore, geocodingService)
         );
 
       case 'check_service_status':
         return await withAnalytics('check_service_status', async () =>
-          handleCheckServiceStatus(noaaService, openMeteoService, SERVER_VERSION)
+          handleCheckServiceStatus(openMeteoService, SERVER_VERSION)
         );
 
       case 'search_location':
@@ -735,7 +690,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_marine_conditions':
         return await withAnalytics('get_marine_conditions', async () =>
-          handleGetMarineConditions(args, noaaService, openMeteoService, locationStore, geocodingService)
+          handleGetMarineConditions(args, openMeteoService, locationStore, geocodingService)
         );
 
       case 'get_weather_imagery':
@@ -750,12 +705,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_river_conditions':
         return await withAnalytics('get_river_conditions', async () =>
-          handleGetRiverConditions(args, noaaService, locationStore, geocodingService)
+          handleGetRiverConditions(args, locationStore, geocodingService)
         );
 
       case 'get_wildfire_info':
         return await withAnalytics('get_wildfire_info', async () =>
-          handleGetWildfireInfo(args, nifcService, locationStore, geocodingService)
+          handleGetWildfireInfo(args, locationStore, geocodingService)
         );
 
       case 'save_location':
@@ -854,7 +809,6 @@ async function main() {
       logger.info('Analytics flushed');
 
       // 2. Clean up resources
-      noaaService.clearCache();
       openMeteoService.clearCache();
       logger.info('Cache cleared');
 
@@ -889,9 +843,7 @@ async function main() {
     // Inform users about version and upgrade options
     logger.info('Version check', {
       installedVersion: SERVER_VERSION,
-      latestRelease: 'https://github.com/weather-mcp/weather-mcp/releases/latest',
-      upgradeInstructions: 'https://github.com/weather-mcp/weather-mcp#upgrading-to-latest-version',
-      autoUpdateTip: 'Use npx -y @dangahagan/weather-mcp@latest in MCP config for automatic updates'
+      repository: 'https://github.com/tomohiro-owada/weather-mcp-ph'
     });
   } catch (error) {
     logger.error('Failed to start server', error as Error);

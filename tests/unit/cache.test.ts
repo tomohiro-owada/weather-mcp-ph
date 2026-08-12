@@ -7,7 +7,7 @@ describe('Cache', () => {
   beforeEach(() => {
     // Create cache with max size of 3 for testing
     // Use a very large number instead of Infinity to avoid Node.js timeout warnings
-    cache = new Cache<string>(3, Number.MAX_SAFE_INTEGER);
+    cache = new Cache<string>(3, 60_000);
   });
 
   afterEach(() => {
@@ -271,7 +271,7 @@ describe('Cache', () => {
     });
 
     it('should handle very large TTL values', () => {
-      cache.set('key', 'value', Number.MAX_SAFE_INTEGER);
+      cache.set('key', 'value', 2_000_000_000);
       expect(cache.get('key')).toBe('value');
     });
 

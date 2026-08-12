@@ -1,253 +1,77 @@
-/**
- * Handler for get_wildfire_info tool
- */
-
-import { NIFCService } from '../services/nifc.js';
+import { firmsService } from '../services/firms.js';
 import { LocationStore } from '../services/locationStore.js';
 import { GeocodingService } from '../services/geocoding.js';
 import { resolveLocationAsync, prependLocationLine } from '../utils/locationResolver.js';
-import { validateDetail } from '../utils/validation.js';
-import { guessTimezoneFromCoords } from '../utils/timezone.js';
 import { calculateDistance } from '../utils/distance.js';
-import type { WildfireInfo } from '../types/wildfire.js';
+import { validateDetail } from '../utils/validation.js';
 
 interface WildfireArgs {
   latitude?: number;
   longitude?: number;
   location_name?: string;
   city_name?: string;
-  radius?: number; // search radius in km (default: 100)
+  radius?: number;
   detail?: 'summary' | 'standard' | 'full';
 }
 
 export async function handleGetWildfireInfo(
   args: unknown,
-  nifcService: NIFCService,
   locationStore: LocationStore,
   geocodingService: GeocodingService
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
-  // Resolve location from coordinates, a saved location name, or a geocoded city name
-  const resolved = await resolveLocationAsync(args as WildfireArgs, locationStore, geocodingService);
-  const { latitude, longitude } = resolved;
+  const typedArgs = (args ?? {}) as WildfireArgs;
+  const resolved = await resolveLocationAsync(typedArgs, locationStore, geocodingService);
+  const detail = validateDetail(typedArgs.detail);
+  const radius = Math.max(1, Math.min(typedArgs.radius ?? 100, 500));
+  let output = '# Satellite Fire Detections\n\n';
+  output += `**Search radius:** ${radius} km\n\n`;
 
-  // Output verbosity: 'full' lifts the fire display cap to 25 (not unbounded).
-  const detail = validateDetail((args as WildfireArgs)?.detail);
-
-  // Validate radius parameter
-  let radius = (args as WildfireArgs)?.radius ?? 100; // default 100 km
-  if (typeof radius !== 'number' || isNaN(radius) || !isFinite(radius)) {
-    radius = 100;
+  if (!firmsService.isConfigured()) {
+    output += '⚙️ **NASA FIRMS is not configured.**\n\n';
+    output += 'Set `FIRMS_MAP_KEY` to a free NASA FIRMS map key to enable this optional tool.\n';
+    return prependLocationLine({ content: [{ type: 'text', text: output }] }, resolved);
   }
-  // Clamp to valid range (1-500 km)
-  radius = Math.max(1, Math.min(radius, 500));
 
-  // Get timezone for proper time formatting
-  const timezone = guessTimezoneFromCoords(latitude, longitude);
+  const latOffset = radius / 111;
+  const lonOffset = radius / (111 * Math.max(0.1, Math.cos(resolved.latitude * Math.PI / 180)));
+  const detections = await firmsService.getDetections(
+    resolved.longitude - lonOffset,
+    resolved.latitude - latOffset,
+    resolved.longitude + lonOffset,
+    resolved.latitude + latOffset
+  );
+  const nearby = detections
+    .map(detection => ({
+      detection,
+      distance: calculateDistance(
+        resolved.latitude,
+        resolved.longitude,
+        detection.latitude,
+        detection.longitude
+      )
+    }))
+    .filter(item => item.distance <= radius)
+    .sort((a, b) => a.distance - b.distance);
 
-  let output = `# Wildfire Information Report\n\n`;
-  output += `**Location:** ${latitude.toFixed(4)}, ${longitude.toFixed(4)}\n`;
-  output += `**Search Radius:** ${radius} km (${(radius * 0.621371).toFixed(1)} miles)\n\n`;
-
-  try {
-    // Calculate bounding box from center point and radius
-    // Approximate: 1 degree latitude ≈ 111 km
-    const latOffset = radius / 111;
-    const lonOffset = radius / (111 * Math.cos(latitude * Math.PI / 180));
-
-    const west = longitude - lonOffset;
-    const south = latitude - latOffset;
-    const east = longitude + lonOffset;
-    const north = latitude + latOffset;
-
-    // Query NIFC for fire perimeters
-    const response = await nifcService.queryFirePerimeters(west, south, east, north);
-    const features = response.features || [];
-
-    if (features.length === 0) {
-      output += `✅ **No active wildfires found within ${radius} km**\n\n`;
-      if (response.exceededTransferLimit) {
-        output += `*Results may be incomplete — the fire data service truncated the response.*\n\n`;
+  if (nearby.length === 0) {
+    output += '✅ **No VIIRS heat detections were found in the last 24 hours within this radius.**\n\n';
+  } else {
+    output += `🔥 **${nearby.length} satellite heat detection${nearby.length === 1 ? '' : 's'} found**\n\n`;
+    const cap = detail === 'full' ? 25 : detail === 'summary' ? 3 : 10;
+    for (const { detection, distance } of nearby.slice(0, cap)) {
+      output += `- **${distance.toFixed(1)} km away** at `;
+      output += `${detection.latitude.toFixed(4)}, ${detection.longitude.toFixed(4)} — `;
+      output += `${detection.acquiredAt.toISOString()}`;
+      if (detection.fireRadiativePower !== null) {
+        output += ` · FRP ${detection.fireRadiativePower.toFixed(1)} MW`;
       }
-      output += `The area is currently clear of reported wildfire activity.\n\n`;
-      output += `**Note:** This data includes active wildfires and prescribed burns tracked by the National Interagency Fire Center. Small fires or very recent ignitions may not yet be included.\n`;
-    } else {
-      // Process and filter fires by actual distance
-      const firesWithDistance: Array<{ fire: WildfireInfo; distance: number }> = [];
-
-      for (const feature of features) {
-        const attrs = feature.attributes;
-
-        // Calculate distance from center point to fire origin
-        let fireDistance = radius; // default if no coordinates
-
-        if (attrs.attr_InitialLatitude && attrs.attr_InitialLongitude) {
-          fireDistance = calculateDistance(
-            latitude,
-            longitude,
-            attrs.attr_InitialLatitude,
-            attrs.attr_InitialLongitude
-          );
-        } else if (feature.geometry?.rings?.[0]?.[0]) {
-          // Use first point of fire perimeter if no origin coordinates
-          const [fireLon, fireLat] = feature.geometry.rings[0][0];
-          fireDistance = calculateDistance(latitude, longitude, fireLat, fireLon);
-        }
-
-        // Only include fires within radius
-        if (fireDistance <= radius) {
-          const fireInfo: WildfireInfo = {
-            name: attrs.poly_IncidentName || 'Unknown Fire',
-            distance: fireDistance,
-            acres: attrs.poly_GISAcres || attrs.attr_FinalAcres || attrs.attr_CalculatedAcres || 0,
-            containment: attrs.attr_PercentContained || 0,
-            discoveryDate: attrs.attr_FireDiscoveryDateTime
-              ? new Date(attrs.attr_FireDiscoveryDateTime)
-              : new Date(),
-            latitude: attrs.attr_InitialLatitude,
-            longitude: attrs.attr_InitialLongitude,
-            state: attrs.attr_POOState,
-            county: attrs.attr_POOCounty,
-            city: attrs.attr_POOCity,
-            type: attrs.attr_IncidentTypeCategory === 'WF' ? 'Wildfire' :
-                  attrs.attr_IncidentTypeCategory === 'RX' ? 'Prescribed Fire' : 'Unknown',
-            status: attrs.poly_FeatureStatus || 'Active'
-          };
-
-          firesWithDistance.push({ fire: fireInfo, distance: fireDistance });
-        }
-      }
-
-      // Sort by distance (nearest first)
-      firesWithDistance.sort((a, b) => a.distance - b.distance);
-
-      const fireCount = firesWithDistance.length;
-      const wildfireCount = firesWithDistance.filter(f => f.fire.type === 'Wildfire').length;
-      const prescribedCount = firesWithDistance.filter(f => f.fire.type === 'Prescribed Fire').length;
-
-      output += `🔥 **Found ${fireCount} active fire${fireCount > 1 ? 's' : ''}**\n`;
-      if (wildfireCount > 0) {
-        output += `   - ${wildfireCount} wildfire${wildfireCount > 1 ? 's' : ''}\n`;
-      }
-      if (prescribedCount > 0) {
-        output += `   - ${prescribedCount} prescribed burn${prescribedCount > 1 ? 's' : ''}\n`;
-      }
-      if (response.exceededTransferLimit) {
-        output += `\n*Results may be incomplete — the fire data service truncated the response.*\n`;
-      }
-      output += `\n`;
-
-      // Show details for nearest fires. detail="full" lifts the cap to 25 (still
-      // capped, not unbounded — see D2 in docs/output-completeness-plan.md); the
-      // remainder note stays accurate at every level, including full.
-      const maxFiresToShow = detail === 'full' ? 25 : 5;
-      const firesToShow = firesWithDistance.slice(0, maxFiresToShow);
-
-      for (const { fire, distance } of firesToShow) {
-        output += formatFireDetails(fire, distance, timezone);
-      }
-
-      if (firesWithDistance.length > maxFiresToShow) {
-        const remaining = firesWithDistance.length - maxFiresToShow;
-        const plural = remaining > 1 ? 's' : '';
-        if (detail === 'full') {
-          output += `\n*Note: ${remaining} additional fire${plural} found within radius (showing nearest ${maxFiresToShow})*\n`;
-        } else {
-          output += `\n*Note: ${remaining} additional fire${plural} found within radius (showing nearest ${maxFiresToShow} only — use detail="full" for more)*\n`;
-        }
-      }
-
-      // Safety recommendations based on nearest wildfire
-      const nearestWildfire = firesWithDistance.find(f => f.fire.type === 'Wildfire');
-      if (nearestWildfire) {
-        output += `\n## Safety Assessment\n\n`;
-        const dist = nearestWildfire.distance;
-
-        if (dist < 5) {
-          output += `⚠️ **EXTREME DANGER** - Wildfire within 5 km\n`;
-          output += `- Evacuate immediately if advised by authorities\n`;
-          output += `- Monitor local emergency alerts\n`;
-          output += `- Have evacuation plan ready\n`;
-        } else if (dist < 25) {
-          output += `🟠 **HIGH ALERT** - Wildfire within 25 km\n`;
-          output += `- Monitor fire conditions closely\n`;
-          output += `- Prepare for possible evacuation\n`;
-          output += `- Watch for smoke and changing conditions\n`;
-        } else if (dist < 50) {
-          output += `🟡 **CAUTION** - Wildfire within 50 km\n`;
-          output += `- Be aware of smoke and air quality impacts\n`;
-          output += `- Monitor local news and fire updates\n`;
-        } else {
-          output += `ℹ️ **AWARENESS** - Wildfire detected within ${radius} km\n`;
-          output += `- Stay informed about fire progression\n`;
-          output += `- Air quality may be affected by smoke\n`;
-        }
-        output += `\n`;
-      }
+      output += ` · confidence ${detection.confidence}\n`;
     }
-  } catch (error) {
-    output += `❌ **Error retrieving wildfire data**\n\n`;
-    output += `Unable to fetch fire information. This may be due to:\n`;
-    output += `- Temporary service unavailability\n`;
-    output += `- Network connectivity issues\n`;
-    output += `- Service maintenance\n\n`;
-    output += `Error details: ${error instanceof Error ? error.message : String(error)}\n`;
+    output += '\n';
   }
 
-  output += `\n---\n`;
-  output += `*Data source: NIFC (National Interagency Fire Center) WFIGS*\n`;
-  output += `*Wildfire data is updated throughout the day. Always consult official sources for evacuation orders and emergency information.*\n`;
-  output += `*For active incidents and evacuation orders, visit: https://inciweb.nwcg.gov/*\n`;
-
-  return prependLocationLine({
-    content: [
-      {
-        type: 'text',
-        text: output
-      }
-    ]
-  }, resolved);
-}
-
-/**
- * Format detailed information for a single wildfire
- */
-function formatFireDetails(fire: WildfireInfo, distance: number, timezone: string): string {
-  let output = `## ${fire.name}\n\n`;
-
-  // Fire type emoji
-  const typeEmoji = fire.type === 'Wildfire' ? '🔥' :
-                    fire.type === 'Prescribed Fire' ? '🟦' : '⚪';
-
-  output += `**Type:** ${typeEmoji} ${fire.type}\n`;
-  output += `**Distance:** ${distance.toFixed(1)} km (${(distance * 0.621371).toFixed(1)} mi)\n`;
-
-  if (fire.state) {
-    let location = fire.state;
-    if (fire.county) location += `, ${fire.county} County`;
-    if (fire.city) location += ` near ${fire.city}`;
-    output += `**Location:** ${location}\n`;
-  }
-
-  if (fire.latitude && fire.longitude) {
-    output += `**Coordinates:** ${fire.latitude.toFixed(4)}, ${fire.longitude.toFixed(4)}\n`;
-  }
-
-  output += `\n`;
-
-  // Fire statistics
-  output += `### Status\n`;
-  output += `**Size:** ${fire.acres.toFixed(0)} acres (${(fire.acres * 0.404686).toFixed(0)} hectares)\n`;
-
-  // Containment with visual indicator
-  const containmentBars = Math.round(fire.containment / 10);
-  const containmentVisual = '█'.repeat(containmentBars) + '░'.repeat(10 - containmentBars);
-  output += `**Containment:** ${fire.containment.toFixed(0)}% ${containmentVisual}\n`;
-
-  const now = new Date();
-  const daysActive = Math.floor((now.getTime() - fire.discoveryDate.getTime()) / (1000 * 60 * 60 * 24));
-  output += `**Discovery Date:** ${fire.discoveryDate.toLocaleDateString('en-US', { timeZone: timezone })}\n`;
-  output += `**Days Active:** ${daysActive}\n`;
-
-  output += `\n---\n\n`;
-  return output;
+  output += '⚠️ FIRMS reports satellite heat anomalies, not confirmed named wildfires. Industrial heat, agricultural burning, and other sources may appear. It does not provide containment or evacuation status.\n\n';
+  output += '---\n';
+  output += '*Data source: NASA LANCE FIRMS, VIIRS S-NPP near-real-time active fire product*\n';
+  return prependLocationLine({ content: [{ type: 'text', text: output }] }, resolved);
 }

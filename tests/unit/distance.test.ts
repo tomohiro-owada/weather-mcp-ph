@@ -344,8 +344,8 @@ describe('Distance Calculation Utilities', () => {
 
       const duration = performance.now() - start;
 
-      // 1000 calculations should complete in < 10ms
-      expect(duration).toBeLessThan(10);
+      // Keep this as a broad regression guard; shared CI runners are noisy.
+      expect(duration).toBeLessThan(100);
     });
 
     it('should handle batch calculations efficiently', () => {

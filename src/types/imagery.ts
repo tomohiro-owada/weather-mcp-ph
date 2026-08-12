@@ -1,6 +1,6 @@
 /**
  * Type definitions for weather imagery data
- * Supports NOAA radar/satellite and RainViewer precipitation radar
+ * Supports RainViewer precipitation imagery and NASA GIBS satellite imagery
  */
 
 /**
@@ -76,16 +76,4 @@ export interface RainViewerResponse {
   satellite?: {
     infrared: RainViewerFrame[];
   };
-}
-
-/**
- * NOAA radar station information
- */
-export interface NOAARadarStation {
-  id: string;
-  name: string;
-  latitude: number;
-  longitude: number;
-  elevation: number;
-  distance?: number;  // Distance from query point in km
 }

@@ -55,9 +55,9 @@ function makeGeocodingResult(overrides: Partial<GeocodingResult> = {}): Geocodin
 
 function makeSavedLocation(overrides: Partial<SavedLocation> = {}): SavedLocation {
   return {
-    name: 'Seattle, WA',
-    latitude: 47.6062,
-    longitude: -122.3321,
+    name: 'Manila',
+    latitude: 14.5995,
+    longitude: 120.9842,
     saved_at: '2025-01-15T10:30:00.000Z',
     updated_at: '2025-01-15T10:30:00.000Z',
     ...overrides,
@@ -124,7 +124,7 @@ describe('resolveLocationAsync', () => {
       );
 
       expect(resolved.source).toBe('saved_location');
-      expect(resolved.latitude).toBe(47.6062);
+      expect(resolved.latitude).toBe(14.5995);
       expect(geocode).not.toHaveBeenCalled();
     });
   });
@@ -137,8 +137,8 @@ describe('resolveLocationAsync', () => {
       const resolved = await resolveLocationAsync({ location_name: 'home' }, store, service);
 
       expect(resolved).toEqual({
-        latitude: 47.6062,
-        longitude: -122.3321,
+        latitude: 14.5995,
+        longitude: 120.9842,
         source: 'saved_location',
         location_name: 'home',
       });
@@ -173,12 +173,12 @@ describe('resolveLocationAsync', () => {
     it('passes through the geocoder display_name as location_name', async () => {
       const store = makeLocationStore();
       const { service } = makeGeocodingService([
-        makeGeocodingResult({ display_name: 'Bend, Deschutes County, Oregon, United States' }),
+        makeGeocodingResult({ display_name: 'Baguio, Benguet, Philippines' }),
       ]);
 
-      const resolved = await resolveLocationAsync({ city_name: 'Bend, Oregon' }, store, service);
+      const resolved = await resolveLocationAsync({ city_name: 'Baguio, Philippines' }, store, service);
 
-      expect(resolved.location_name).toBe('Bend, Deschutes County, Oregon, United States');
+      expect(resolved.location_name).toBe('Baguio, Benguet, Philippines');
     });
 
     it('caches results so a repeated lookup does not re-hit the geocoder', async () => {
@@ -246,12 +246,12 @@ describe('formatLocationLine', () => {
 
   it('discloses the matched name and coordinates for a saved location', () => {
     const resolved: ResolvedLocation = {
-      latitude: 47.6062,
-      longitude: -122.3321,
+      latitude: 14.5995,
+      longitude: 120.9842,
       source: 'saved_location',
       location_name: 'home',
     };
-    expect(formatLocationLine(resolved)).toBe('**Location:** home (47.6062, -122.3321)\n\n');
+    expect(formatLocationLine(resolved)).toBe('**Location:** home (14.5995, 120.9842)\n\n');
   });
 
   it('discloses the geocoder display name for a city lookup', () => {
@@ -269,8 +269,8 @@ describe('formatLocationLine', () => {
 describe('prependLocationLine', () => {
   it('prepends the location line to the first text block for a name lookup', () => {
     const resolved: ResolvedLocation = {
-      latitude: 47.6062,
-      longitude: -122.3321,
+      latitude: 14.5995,
+      longitude: 120.9842,
       source: 'saved_location',
       location_name: 'home',
     };
@@ -278,7 +278,7 @@ describe('prependLocationLine', () => {
 
     const out = prependLocationLine(result, resolved);
 
-    expect(out.content[0].text).toBe('**Location:** home (47.6062, -122.3321)\n\n# Forecast\n');
+    expect(out.content[0].text).toBe('**Location:** home (14.5995, 120.9842)\n\n# Forecast\n');
   });
 
   it('is a no-op for direct coordinate input', () => {

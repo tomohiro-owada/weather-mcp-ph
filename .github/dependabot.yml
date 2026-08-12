@@ -29,14 +29,12 @@ updates:
           - "@modelcontextprotocol/*"
           - "axios"
           - "dotenv"
+          - "fast-xml-parser"
         update-types:
           - "minor"
           - "patch"
     # Automatically rebase PRs when they become outdated
     rebase-strategy: "auto"
-    # Add reviewers (customize with actual GitHub usernames if desired)
-    # reviewers:
-    #   - "dgahagan"
     # Add labels to Dependabot PRs
     labels:
       - "dependencies"

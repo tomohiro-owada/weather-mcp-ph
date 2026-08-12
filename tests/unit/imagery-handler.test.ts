@@ -612,7 +612,7 @@ describe('Weather Imagery Handler', () => {
       expect(result.location.longitude).toBe(151.2093);
     });
 
-    it('should select GOES-West satellite for far-western longitudes', async () => {
+    it('should select Himawari satellite imagery for the Philippines', async () => {
       const result = await getWeatherImagery({
         latitude: 61.2181,
         longitude: -149.9003, // Anchorage
@@ -620,7 +620,7 @@ describe('Weather Imagery Handler', () => {
         animated: false
       });
 
-      expect(result.frames[0].url).toContain('GOES-West_ABI_GeoColor');
+      expect(result.frames[0].url).toContain('Himawari_AHI_Band13_Clean_Infrared');
     });
   });
 });

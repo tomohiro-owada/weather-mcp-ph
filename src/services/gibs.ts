@@ -1,8 +1,8 @@
 /**
  * NASA GIBS (Global Imagery Browse Services) client for satellite imagery.
  *
- * Serves NOAA GOES-East / GOES-West ABI GeoColor as WMTS XYZ tiles in Web
- * Mercator (EPSG:3857), with Western-Hemisphere coverage and no authentication.
+ * Serves Himawari-9 AHI imagery as WMTS XYZ tiles in Web Mercator
+ * (EPSG:3857), covering the Philippines and western Pacific without auth.
  *
  * GeoColor is a multispectral blend (true color by day, IR cloud-top imagery at
  * night), so it is useful 24/7. Tile URLs are constructed directly (no network
@@ -21,9 +21,9 @@ import { ImageryFrame } from '../types/imagery.js';
 /** WMTS REST base for EPSG:3857 "best" imagery. */
 const GIBS_BASE = 'https://gibs.earthdata.nasa.gov/wmts/epsg3857/best';
 
-/** Tile matrix set supported by the GeoColor layers (zoom 0–7). */
-const TILE_MATRIX_SET = 'GoogleMapsCompatible_Level7';
-const MAX_ZOOM = 7;
+/** Tile matrix set supported by Himawari geostationary layers (zoom 0–6). */
+const TILE_MATRIX_SET = 'GoogleMapsCompatible_Level6';
+const MAX_ZOOM = 6;
 
 /** Regional default zoom for a satellite view centered on the coordinate. */
 const DEFAULT_ZOOM = 5;
@@ -32,14 +32,7 @@ const DEFAULT_ZOOM = 5;
 const MAX_LATITUDE = 85.05112878;
 
 export class GibsService {
-  /**
-   * Choose the GOES satellite whose disk best covers the longitude.
-   * GOES-West (~137°W) favors the Pacific/Alaska/Hawaii/far west; GOES-East
-   * (~75°W) covers the rest of the Americas.
-   */
-  private selectLayer(longitude: number): string {
-    return longitude <= -115 ? 'GOES-West_ABI_GeoColor' : 'GOES-East_ABI_GeoColor';
-  }
+  private readonly layer = 'Himawari_AHI_Band13_Clean_Infrared';
 
   /** Convert lat/lon to WMTS tile column/row at a zoom level (Web Mercator). */
   private tileColRow(latitude: number, longitude: number, zoom: number): { x: number; y: number } {
@@ -64,24 +57,16 @@ export class GibsService {
     return `${GIBS_BASE}/${layer}/default/${TILE_MATRIX_SET}/${z}/${y}/${x}.png`;
   }
 
-  /** A short, human label for which satellite a layer represents. */
-  private satelliteLabel(layer: string): string {
-    return layer.startsWith('GOES-West') ? 'GOES-West' : 'GOES-East';
-  }
-
   /**
-   * Get the latest GOES GeoColor satellite frame for a location.
+   * Get the latest Himawari-9 clean-infrared frame for a location.
    * Returns a single frame (satellite animation is not supported — see file header).
    */
   getSatelliteImagery(latitude: number, longitude: number): ImageryFrame[] {
-    const layer = this.selectLayer(longitude);
-    const sat = this.satelliteLabel(layer);
-
     return [
       {
-        url: this.buildTileUrl(layer, latitude, longitude, DEFAULT_ZOOM),
+        url: this.buildTileUrl(this.layer, latitude, longitude, DEFAULT_ZOOM),
         timestamp: new Date(),
-        description: `${sat} GeoColor satellite (latest)`
+        description: 'Himawari-9 clean infrared satellite (latest)'
       }
     ];
   }

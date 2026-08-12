@@ -648,7 +648,7 @@ export interface ClimateNormals {
   /** Normal precipitation in inches */
   precipitation: number;
   /** Source of normals data */
-  source: 'NCEI' | 'Open-Meteo';
+  source: 'Open-Meteo';
   /** Month (1-12) */
   month: number;
   /** Day of month (1-31) */

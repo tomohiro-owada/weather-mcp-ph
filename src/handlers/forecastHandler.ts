@@ -1,61 +1,15 @@
-/**
- * Handler for get_forecast tool
- * Supports both NOAA (US) and Open-Meteo (global) forecast sources
- */
-
-import { DateTime } from 'luxon';
-import { NOAAService } from '../services/noaa.js';
 import { OpenMeteoService } from '../services/openmeteo.js';
-import { NCEIService } from '../services/ncei.js';
 import { LocationStore } from '../services/locationStore.js';
 import { GeocodingService } from '../services/geocoding.js';
-import type { GridpointProperties, GridpointDataSeries } from '../types/noaa.js';
+import { resolveLocationAsync, prependLocationLine } from '../utils/locationResolver.js';
 import {
   validateForecastDays,
   validateGranularity,
   validateOptionalBoolean,
   validateDetail,
-  DetailLevel,
+  DetailLevel
 } from '../utils/validation.js';
-import { resolveLocationAsync, formatLocationLine } from '../utils/locationResolver.js';
 import { resolveUnitPreferences, UnitArgs } from '../utils/unitPreferences.js';
-import { UnitPreferences } from '../config/units.js';
-import {
-  temperatureLabel,
-  windSpeedLabel,
-  precipitationLabel,
-  noaaUnitsParam,
-  formatElevationFromM,
-  formatLuxonTime,
-} from '../utils/unitFormat.js';
-import { logger } from '../utils/logger.js';
-import {
-  extractSnowfallForecast,
-  extractIceAccumulation,
-  formatSnowData,
-  hasWinterWeather
-} from '../utils/snow.js';
-import { formatInTimezone, guessTimezoneFromCoords } from '../utils/timezone.js';
-import { getClimateNormals, formatNormals, getDateComponents } from '../utils/normals.js';
-import { isInUS } from '../utils/geography.js';
-import { DataNotFoundError, InvalidLocationError } from '../errors/ApiError.js';
-
-/** Note shown when an auto-routed NOAA request falls back to Open-Meteo. */
-const NOAA_FALLBACK_NOTE =
-  '*NOAA does not cover this location; showing Open-Meteo model data instead.*';
-
-/**
- * Insert a note line directly under the output's top heading (first line),
- * keeping the heading itself as the first thing the client renders.
- */
-function insertNoteAfterHeading(text: string, note: string): string {
-  const newline = text.indexOf('\n');
-  if (newline === -1) {
-    return `${text}\n\n${note}\n`;
-  }
-  // The remainder starts with the original newline(s), so no trailing \n here.
-  return `${text.slice(0, newline)}\n\n${note}${text.slice(newline)}`;
-}
 
 interface ForecastArgs extends UnitArgs {
   latitude?: number;
@@ -65,659 +19,118 @@ interface ForecastArgs extends UnitArgs {
   days?: number;
   granularity?: 'daily' | 'hourly';
   include_precipitation_probability?: boolean;
-  include_severe_weather?: boolean;
   include_normals?: boolean;
-  source?: 'auto' | 'noaa' | 'openmeteo';
   detail?: DetailLevel;
 }
 
-/**
- * Cap the number of hourly forecast entries by verbosity level.
- * Hourly forecasts can emit up to days*24 entries (384 at 16 days), which is
- * expensive for assistant contexts. Unless the user asks for detail="full",
- * cap to a short horizon; the daily view still covers the full requested range.
- *
- * @param detail - Requested verbosity
- * @param days - Number of forecast days requested
- * @returns Maximum hourly entries to emit
- */
-function hourlyEntryCap(detail: DetailLevel, days: number): number {
-  const maxHours = days * 24;
-  if (detail === 'full') return maxHours;
-  if (detail === 'summary') return Math.min(24, maxHours);
-  return Math.min(48, maxHours); // standard default
+function value<T>(items: T[] | undefined, index: number): T | undefined {
+  return items?.[index];
 }
 
-/**
- * Extract maximum value from gridpoint data series for the next 24-48 hours
- * @param series - The gridpoint data series to process
- * @param hours - Number of hours to look ahead (default: 48)
- * @param maxEntries - Maximum number of entries to process for defense-in-depth (default: 500 ~ 1 week hourly data)
- */
-function getMaxProbabilityFromSeries(series: GridpointDataSeries | undefined, hours: number = 48, maxEntries: number = 500): number {
-  if (!series || !series.values || series.values.length === 0) {
-    return 0;
-  }
-
-  // Defense-in-depth: Add bounds checking to prevent resource exhaustion
-  // IMPORTANT: Work on a local copy to avoid mutating cached data
-  let valuesToProcess = series.values;
-  if (series.values.length > maxEntries) {
-    logger.warn('Gridpoint series exceeds max entries', {
-      length: series.values.length,
-      maxEntries,
-      securityEvent: true
-    });
-    // Create a local copy with limited entries - do not mutate the original
-    valuesToProcess = series.values.slice(0, maxEntries);
-  }
-
-  const now = new Date();
-  const futureTime = new Date(now.getTime() + hours * 60 * 60 * 1000);
-
-  let maxValue = 0;
-  for (const entry of valuesToProcess) {
-    // Parse ISO 8601 interval (e.g., "2025-11-06T15:00:00+00:00/PT1H")
-    const validTimeStart = new Date(entry.validTime.split('/')[0]);
-
-    if (validTimeStart >= now && validTimeStart <= futureTime && entry.value !== null) {
-      maxValue = Math.max(maxValue, entry.value);
-    }
-  }
-
-  return maxValue;
-}
-
-/**
- * Format severe weather probabilities for display
- */
-function formatSevereWeather(properties: GridpointProperties): string | null {
-  let output = '';
-  let hasData = false;
-
-  output += `\n## ⚠️ Severe Weather Probabilities (Next 48 Hours)\n\n`;
-
-  // Thunder probability
-  const thunderProb = getMaxProbabilityFromSeries(properties.probabilityOfThunder);
-  if (thunderProb > 0) {
-    hasData = true;
-    const emoji = thunderProb > 50 ? '🌩️' : thunderProb > 20 ? '⚡' : '🌤️';
-    output += `${emoji} **Thunderstorms:** ${thunderProb}% chance\n`;
-  }
-
-  // Wind gust probabilities (show highest risk category)
-  const windGust60 = getMaxProbabilityFromSeries(properties.potentialOf60mphWindGusts);
-  const windGust50 = getMaxProbabilityFromSeries(properties.potentialOf50mphWindGusts);
-  const windGust40 = getMaxProbabilityFromSeries(properties.potentialOf40mphWindGusts);
-  const windGust30 = getMaxProbabilityFromSeries(properties.potentialOf30mphWindGusts);
-
-  if (windGust60 > 0) {
-    hasData = true;
-    output += `💨 **Very High Wind Gusts (60+ mph):** ${windGust60}% chance\n`;
-  } else if (windGust50 > 0) {
-    hasData = true;
-    output += `💨 **High Wind Gusts (50+ mph):** ${windGust50}% chance\n`;
-  } else if (windGust40 > 0) {
-    hasData = true;
-    output += `💨 **Strong Wind Gusts (40+ mph):** ${windGust40}% chance\n`;
-  } else if (windGust30 > 20) {
-    // Only show moderate gusts if probability is significant
-    hasData = true;
-    output += `💨 **Moderate Wind Gusts (30+ mph):** ${windGust30}% chance\n`;
-  }
-
-  // Tropical storm/hurricane winds (if present)
-  const tropicalStormProb = getMaxProbabilityFromSeries(properties.probabilityOfTropicalStormWinds);
-  const hurricaneProb = getMaxProbabilityFromSeries(properties.probabilityOfHurricaneWinds);
-
-  if (hurricaneProb > 0) {
-    hasData = true;
-    output += `🌀 **Hurricane-Force Winds (74+ mph):** ${hurricaneProb}% chance\n`;
-  } else if (tropicalStormProb > 0) {
-    hasData = true;
-    output += `🌀 **Tropical Storm Winds (39-73 mph):** ${tropicalStormProb}% chance\n`;
-  }
-
-  // Lightning activity
-  if (properties.lightningActivityLevel && properties.lightningActivityLevel.values && properties.lightningActivityLevel.values.length > 0) {
-    const lightningLevels = properties.lightningActivityLevel.values.filter(v => v.value !== null && v.value > 0);
-    if (lightningLevels.length > 0) {
-      hasData = true;
-      const maxLevel = Math.max(...lightningLevels.map(v => v.value || 0));
-      const levelDesc = maxLevel >= 4 ? 'Very High' : maxLevel >= 3 ? 'High' : maxLevel >= 2 ? 'Moderate' : 'Low';
-      output += `⚡ **Lightning Activity:** ${levelDesc} (Level ${maxLevel})\n`;
-    }
-  }
-
-  if (!hasData) {
-    return null; // No severe weather data to display
-  }
-
-  output += `\n*Note: These are probabilistic forecasts and may change. Always monitor local weather alerts for official warnings.*\n`;
-
-  return output;
+function hourlyCap(detail: DetailLevel, days: number): number {
+  if (detail === 'full') return days * 24;
+  return detail === 'summary' ? 24 : 48;
 }
 
 export async function handleGetForecast(
   args: unknown,
-  noaaService: NOAAService,
   openMeteoService: OpenMeteoService,
   locationStore: LocationStore,
-  geocodingService: GeocodingService,
-  nceiService?: NCEIService
+  geocodingService: GeocodingService
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
-  // Resolve location from coordinates, a saved location name, or a geocoded city name
-  const resolved = await resolveLocationAsync(args as ForecastArgs, locationStore, geocodingService);
-  const { latitude, longitude } = resolved;
-  const days = validateForecastDays(args);
-  const granularity = validateGranularity((args as ForecastArgs)?.granularity);
-  const include_precipitation_probability = validateOptionalBoolean(
-    (args as ForecastArgs)?.include_precipitation_probability,
+  const typedArgs = (args ?? {}) as ForecastArgs;
+  const resolved = await resolveLocationAsync(typedArgs, locationStore, geocodingService);
+  const days = validateForecastDays(typedArgs);
+  const granularity = validateGranularity(typedArgs.granularity);
+  const detail = validateDetail(typedArgs.detail);
+  const includeProbability = validateOptionalBoolean(
+    typedArgs.include_precipitation_probability,
     'include_precipitation_probability',
     true
   );
-  const include_severe_weather = validateOptionalBoolean(
-    (args as ForecastArgs)?.include_severe_weather,
-    'include_severe_weather',
-    false
-  );
-  const include_normals = validateOptionalBoolean(
-    (args as ForecastArgs)?.include_normals,
-    'include_normals',
-    false
-  );
-  // Output verbosity: caps hourly output unless detail="full" (see hourlyEntryCap)
-  const detail = validateDetail((args as ForecastArgs)?.detail);
-
-  // Resolve unit preferences (per-call params over the server default)
-  const prefs = resolveUnitPreferences(args as ForecastArgs);
-
-  // Get source preference or auto-detect
-  const requestedSource = (args as ForecastArgs)?.source || 'auto';
-  let useNOAA: boolean;
-
-  if (requestedSource === 'auto') {
-    // Auto-detect based on location (US = NOAA, elsewhere = Open-Meteo)
-    useNOAA = isInUS(latitude, longitude);
-  } else {
-    useNOAA = requestedSource === 'noaa';
-  }
-
-  // Use NOAA for US locations or if explicitly requested
-  let result: { content: Array<{ type: string; text: string }> };
-  if (useNOAA) {
-    try {
-      result = await formatNOAAForecast(
-        noaaService,
-        openMeteoService,
-        nceiService,
-        latitude,
-        longitude,
-        days,
-        granularity,
-        include_precipitation_probability,
-        include_severe_weather,
-        include_normals,
-        prefs,
-        detail
-      );
-    } catch (error) {
-      // The US bounding boxes overrun the border (Toronto, Vancouver, Windsor
-      // all sit inside them), so auto-routed points NOAA rejects fall back to
-      // Open-Meteo instead of erroring. NOAA maps the coverage 404 ("Unable to
-      // provide data for requested point") to DataNotFoundError and other 4xx
-      // to InvalidLocationError — both are non-retryable "NOAA can't serve
-      // this request" failures, so both fall back. Transient failures
-      // (RateLimitError, ServiceUnavailableError, network) still propagate,
-      // and explicit source="noaa" keeps its error contract.
-      if (
-        requestedSource !== 'auto' ||
-        !(error instanceof DataNotFoundError || error instanceof InvalidLocationError)
-      ) {
-        throw error;
-      }
-      logger.warn('NOAA rejected auto-routed location; falling back to Open-Meteo', {
-        latitude,
-        longitude,
-        fallback: true
-      });
-      result = await formatOpenMeteoForecast(
-        openMeteoService,
-        nceiService,
-        latitude,
-        longitude,
-        days,
-        granularity,
-        include_precipitation_probability,
-        include_normals,
-        prefs,
-        detail
-      );
-      if (result.content.length > 0 && result.content[0]?.type === 'text' && result.content[0].text) {
-        result.content[0].text = insertNoteAfterHeading(result.content[0].text, NOAA_FALLBACK_NOTE);
-      }
-    }
-  } else {
-    // Use Open-Meteo for international locations
-    result = await formatOpenMeteoForecast(
-      openMeteoService,
-      nceiService,
-      latitude,
-      longitude,
-      days,
-      granularity,
-      include_precipitation_probability,
-      include_normals,
-      prefs,
-      detail
-    );
-  }
-
-  // If the location was resolved from a name (saved or geocoded), show the user
-  // what it matched so an ambiguous city name is transparent.
-  const locationLine = formatLocationLine(resolved);
-  if (locationLine && result.content.length > 0 && result.content[0]?.type === 'text') {
-    result.content[0].text = locationLine + result.content[0].text;
-  }
-
-  return result;
-}
-
-/**
- * Format NOAA forecast data for display
- */
-async function formatNOAAForecast(
-  noaaService: NOAAService,
-  openMeteoService: OpenMeteoService,
-  nceiService: NCEIService | undefined,
-  latitude: number,
-  longitude: number,
-  days: number,
-  granularity: 'daily' | 'hourly',
-  include_precipitation_probability: boolean,
-  include_severe_weather: boolean,
-  include_normals: boolean,
-  prefs: UnitPreferences,
-  detail: DetailLevel
-): Promise<{ content: Array<{ type: string; text: string }> }> {
-  const noaaUnits = noaaUnitsParam(prefs);
-  // Fetch point data once. It yields both the timezone AND the grid coordinates,
-  // so downstream forecast/gridpoint calls use the grid-based methods directly
-  // instead of re-resolving the point (avoids duplicate upstream lookups on a
-  // cold cache). A point-data failure here propagates — the forecast can't be
-  // built without it anyway.
-  const points = await noaaService.getPointData(latitude, longitude);
-  const { gridId, gridX, gridY } = points.properties;
-  const timezone = points.properties.timeZone || guessTimezoneFromCoords(latitude, longitude);
-
-  // Get forecast data based on granularity (units=us|si controls NWS output units)
-  const forecast = granularity === 'hourly'
-    ? await noaaService.getHourlyForecast(gridId, gridX, gridY, noaaUnits)
-    : await noaaService.getForecast(gridId, gridX, gridY, noaaUnits);
-
-  // Determine how many periods to show
-  let periods;
-  if (granularity === 'hourly') {
-    // Hourly output is capped by verbosity (see hourlyEntryCap) unless full
-    periods = forecast.properties.periods.slice(0, hourlyEntryCap(detail, days));
-  } else {
-    // For daily, show up to days * 2 (day/night periods)
-    periods = forecast.properties.periods.slice(0, days * 2);
-  }
-
-  // Format the forecast for display
-  let output = `# Weather Forecast (${granularity === 'hourly' ? 'Hourly' : 'Daily'})\n\n`;
-  output += `**Location:** ${latitude.toFixed(4)}, ${longitude.toFixed(4)}\n`;
-  output += `**Elevation:** ${formatElevationFromM(forecast.properties.elevation.value, prefs)}\n`;
-  if (forecast.properties.updated) {
-    output += `**Updated:** ${formatInTimezone(forecast.properties.updated, timezone, 'medium', prefs.timeFormat)}\n`;
-  }
-  output += `**Showing:** ${periods.length} ${granularity === 'hourly' ? 'hours' : 'periods'}\n\n`;
-  if (granularity === 'hourly' && detail !== 'full' && forecast.properties.periods.length > periods.length) {
-    output += `*Hourly output capped at ${periods.length} hours (detail="${detail}"). Use detail="full" for the full ${days}-day hourly forecast.*\n\n`;
-  }
-
-  for (const period of periods) {
-    // For hourly forecasts, use the start time as the header since period names are empty
-    const periodHeader = granularity === 'hourly' && !period.name
-      ? formatInTimezone(period.startTime, timezone, 'short', prefs.timeFormat)
-      : period.name;
-    output += `## ${periodHeader}\n`;
-    output += `**Temperature:** ${period.temperature}°${period.temperatureUnit}`;
-
-    // Add temperature trend if available
-    if (period.temperatureTrend && period.temperatureTrend.trim()) {
-      output += ` (${period.temperatureTrend})`;
-    }
-    output += `\n`;
-
-    // Add precipitation probability if requested and available
-    if (include_precipitation_probability && period.probabilityOfPrecipitation?.value !== null && period.probabilityOfPrecipitation?.value !== undefined) {
-      output += `**Precipitation Chance:** ${period.probabilityOfPrecipitation.value}%\n`;
-    }
-
-    output += `**Wind:** ${period.windSpeed} ${period.windDirection}\n`;
-
-    // Add humidity if available (more common in hourly forecasts)
-    if (period.relativeHumidity?.value !== null && period.relativeHumidity?.value !== undefined) {
-      output += `**Humidity:** ${period.relativeHumidity.value}%\n`;
-    }
-
-    output += `**Forecast:** ${period.shortForecast}\n\n`;
-
-    // For daily forecasts, include the long detailed forecast (omitted at summary)
-    if (granularity === 'daily' && detail !== 'summary' && period.detailedForecast) {
-      output += `${period.detailedForecast}\n\n`;
-    }
-  }
-
-  output += `---\n`;
-  output += `*Data source: NOAA National Weather Service (US)*\n`;
-
-  // Fetch gridpoint data once for both severe weather and winter weather
-  let gridpointData: Awaited<ReturnType<typeof noaaService.getGridpointDataByCoordinates>> | null = null;
-
-  // Add severe weather probabilities if requested
-  if (include_severe_weather) {
-    try {
-      gridpointData = await noaaService.getGridpointData(gridId, gridX, gridY);
-      const severeWeatherSection = formatSevereWeather(gridpointData.properties);
-      if (severeWeatherSection) {
-        output += `\n${severeWeatherSection}`;
-      }
-    } catch (error) {
-      // If severe weather data is unavailable, just note it without failing the whole request
-      output += `\n*Note: Severe weather probability data is not available for this location.*\n`;
-    }
-  }
-
-  // Add winter weather (snowfall/ice) if available
-  try {
-    // Fetch gridpoint data if we haven't already
-    if (!gridpointData) {
-      gridpointData = await noaaService.getGridpointData(gridId, gridX, gridY);
-    }
-
-    // Calculate time range for forecast period
-    const now = new Date();
-    const endTime = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
-
-    // Extract snowfall and ice accumulation
-    const snowfall = extractSnowfallForecast(gridpointData.properties, now, endTime);
-    const ice = extractIceAccumulation(gridpointData.properties, now, endTime);
-
-    const winterData = {
-      snowfallAmount: snowfall,
-      iceAccumulation: ice
-    };
-
-    if (hasWinterWeather(winterData)) {
-      output += formatSnowData(winterData);
-    }
-  } catch (error) {
-    // Winter weather data is optional, silently skip if unavailable
-  }
-
-  // Add climate normals if requested and for daily forecasts only
-  if (include_normals && granularity === 'daily') {
-    try {
-      // Get the first forecast day to determine the date
-      const firstPeriod = periods[0];
-      if (firstPeriod && firstPeriod.startTime) {
-        const { month, day } = getDateComponents(firstPeriod.startTime);
-
-        // Fetch climate normals using hybrid strategy
-        const normals = await getClimateNormals(
-          openMeteoService,
-          nceiService,
-          latitude,
-          longitude,
-          month,
-          day
-        );
-
-        // Get forecasted high/low for comparison (first day)
-        let forecastHigh: number | undefined;
-        let forecastLow: number | undefined;
-
-        // NOAA gives day/night periods, so we need to find high (day) and low (night)
-        for (const period of periods.slice(0, 2)) { // Check first 2 periods (day + night)
-          if (period.isDaytime && period.temperature !== undefined) {
-            forecastHigh = period.temperature;
-          } else if (!period.isDaytime && period.temperature !== undefined) {
-            forecastLow = period.temperature;
-          }
-        }
-
-        const currentTemps = {
-          high: forecastHigh,
-          low: forecastLow
-        };
-
-        output += formatNormals(normals, currentTemps, prefs);
-      }
-    } catch (error) {
-      // If normals fetch fails, just skip it (don't error the whole request)
-      output += `\n## Climate Normals\n\n`;
-      output += `⚠️ Climate normals data not available for this location.\n`;
-    }
-  }
-
-  return {
-    content: [
-      {
-        type: 'text',
-        text: output
-      }
-    ]
-  };
-}
-
-/**
- * Format Open-Meteo forecast data for display
- */
-async function formatOpenMeteoForecast(
-  openMeteoService: OpenMeteoService,
-  nceiService: NCEIService | undefined,
-  latitude: number,
-  longitude: number,
-  days: number,
-  granularity: 'daily' | 'hourly',
-  include_precipitation_probability: boolean,
-  include_normals: boolean,
-  prefs: UnitPreferences,
-  detail: DetailLevel
-): Promise<{ content: Array<{ type: string; text: string }> }> {
-  // Unit labels for output (Open-Meteo returns values already in requested units)
-  const tempU = temperatureLabel(prefs);
-  const windU = windSpeedLabel(prefs);
-  const precipU = precipitationLabel(prefs);
-
-  // Get forecast data from Open-Meteo in the requested units
-  const forecast = await openMeteoService.getForecast(
-    latitude,
-    longitude,
+  const includeNormals = validateOptionalBoolean(typedArgs.include_normals, 'include_normals', false);
+  const prefs = resolveUnitPreferences(typedArgs);
+  const response = await openMeteoService.getForecast(
+    resolved.latitude,
+    resolved.longitude,
     days,
     granularity === 'hourly',
     prefs
   );
 
-  let output = `# Weather Forecast (${granularity === 'hourly' ? 'Hourly' : 'Daily'})\n\n`;
-  output += `**Location:** ${latitude.toFixed(4)}, ${longitude.toFixed(4)}\n`;
-  output += `**Elevation:** ${formatElevationFromM(forecast.elevation, prefs)}\n`;
-  output += `**Timezone:** ${forecast.timezone}\n`;
-  output += `**Forecast Days:** ${days}\n\n`;
+  let output = `# Philippine Weather Forecast (${granularity === 'hourly' ? 'Hourly' : 'Daily'})\n\n`;
+  output += `**Timezone:** ${response.timezone}\n`;
+  output += `**Elevation:** ${response.elevation.toFixed(0)} m\n`;
+  output += '**Source:** Open-Meteo multi-model forecast\n\n';
 
-  if (granularity === 'hourly' && forecast.hourly) {
-    // Format hourly data (capped by verbosity unless detail="full")
-    const hourly = forecast.hourly;
-    const numHours = Math.min(hourly.time.length, hourlyEntryCap(detail, days));
-    if (detail !== 'full' && hourly.time.length > numHours) {
-      output += `*Hourly output capped at ${numHours} hours (detail="${detail}"). Use detail="full" for the full ${days}-day hourly forecast.*\n\n`;
+  if (granularity === 'hourly' && response.hourly) {
+    const hourly = response.hourly;
+    const units = response.hourly_units ?? {};
+    const cap = Math.min(hourly.time.length, hourlyCap(detail, days));
+    for (let i = 0; i < cap; i += 1) {
+      output += `## ${hourly.time[i]}\n`;
+      const code = value(hourly.weather_code, i);
+      if (code !== undefined) output += `- Conditions: ${openMeteoService.getWeatherDescription(code)}\n`;
+      const temp = value(hourly.temperature_2m, i);
+      if (temp !== undefined) output += `- Temperature: **${temp}${units.temperature_2m ?? ''}**\n`;
+      const feels = value(hourly.apparent_temperature, i);
+      if (feels !== undefined) output += `- Feels like: ${feels}${units.apparent_temperature ?? ''}\n`;
+      if (includeProbability) {
+        const probability = value(hourly.precipitation_probability, i);
+        if (probability !== undefined) output += `- Precipitation probability: ${probability}%\n`;
+      }
+      const precipitation = value(hourly.precipitation, i);
+      if (precipitation !== undefined) output += `- Precipitation: ${precipitation}${units.precipitation ?? ''}\n`;
+      const wind = value(hourly.wind_speed_10m, i);
+      const gust = value(hourly.wind_gusts_10m, i);
+      if (wind !== undefined) output += `- Wind: ${wind}${units.wind_speed_10m ?? ''}${gust !== undefined ? `, gusts ${gust}${units.wind_gusts_10m ?? ''}` : ''}\n`;
+      const uv = value(hourly.uv_index, i);
+      if (uv !== undefined) output += `- UV index: ${uv}\n`;
+      output += '\n';
     }
-
-    for (let i = 0; i < numHours; i++) {
-      output += `## ${formatInTimezone(hourly.time[i], forecast.timezone, 'short', prefs.timeFormat)}\n`;
-
-      if (hourly.temperature_2m?.[i] !== undefined) {
-        output += `**Temperature:** ${Math.round(hourly.temperature_2m[i])}${tempU}`;
-        if (hourly.apparent_temperature?.[i] !== undefined) {
-          output += ` (feels like ${Math.round(hourly.apparent_temperature[i])}${tempU})`;
-        }
-        output += `\n`;
+    if (cap < hourly.time.length) output += `*Showing ${cap} hours; use detail="full" for the complete range.*\n\n`;
+  } else if (response.daily) {
+    const daily = response.daily;
+    const units = response.daily_units ?? {};
+    for (let i = 0; i < Math.min(days, daily.time.length); i += 1) {
+      output += `## ${daily.time[i]}\n`;
+      const code = value(daily.weather_code, i);
+      if (code !== undefined) output += `- Conditions: ${openMeteoService.getWeatherDescription(code)}\n`;
+      const high = value(daily.temperature_2m_max, i);
+      const low = value(daily.temperature_2m_min, i);
+      if (high !== undefined && low !== undefined) {
+        output += `- Temperature: **${low}${units.temperature_2m_min ?? ''} to ${high}${units.temperature_2m_max ?? ''}**\n`;
       }
-
-      if (include_precipitation_probability && hourly.precipitation_probability?.[i] !== undefined) {
-        output += `**Precipitation Chance:** ${hourly.precipitation_probability[i]}%\n`;
+      if (includeProbability) {
+        const probability = value(daily.precipitation_probability_max, i);
+        if (probability !== undefined) output += `- Precipitation probability: ${probability}%\n`;
       }
-
-      if (hourly.precipitation?.[i] !== undefined && hourly.precipitation[i] > 0) {
-        output += `**Precipitation:** ${hourly.precipitation[i].toFixed(2)} ${precipU}\n`;
-      }
-
-      if (hourly.wind_speed_10m?.[i] !== undefined) {
-        const windDir = hourly.wind_direction_10m?.[i] !== undefined
-          ? ` ${getWindDirection(hourly.wind_direction_10m[i])}`
-          : '';
-        output += `**Wind:** ${Math.round(hourly.wind_speed_10m[i])} ${windU}${windDir}\n`;
-
-        if (hourly.wind_gusts_10m?.[i] !== undefined && hourly.wind_gusts_10m[i] > hourly.wind_speed_10m[i] * 1.2) {
-          output += `**Wind Gusts:** ${Math.round(hourly.wind_gusts_10m[i])} ${windU}\n`;
-        }
-      }
-
-      if (hourly.relative_humidity_2m?.[i] !== undefined) {
-        output += `**Humidity:** ${hourly.relative_humidity_2m[i]}%\n`;
-      }
-
-      if (hourly.weather_code?.[i] !== undefined) {
-        output += `**Conditions:** ${openMeteoService.getWeatherDescription(hourly.weather_code[i])}\n`;
-      }
-
-      output += `\n`;
-    }
-  } else if (forecast.daily) {
-    // Format daily data with sunrise/sunset
-    const daily = forecast.daily;
-    const numDays = Math.min(daily.time.length, days);
-
-    for (let i = 0; i < numDays; i++) {
-      // Open-Meteo returns location-local naive timestamps; parse directly in the
-      // forecast timezone to avoid a double offset shift via the server's zone
-      const dt = DateTime.fromISO(daily.time[i], { zone: forecast.timezone });
-      output += `## ${dt.toLocaleString({ weekday: 'long', month: 'long', day: 'numeric' })}\n`;
-
-      if (daily.temperature_2m_max?.[i] !== undefined && daily.temperature_2m_min?.[i] !== undefined) {
-        output += `**Temperature:** High ${Math.round(daily.temperature_2m_max[i])}${tempU} / Low ${Math.round(daily.temperature_2m_min[i])}${tempU}\n`;
-      }
-
-      if (daily.apparent_temperature_max?.[i] !== undefined && daily.apparent_temperature_min?.[i] !== undefined) {
-        output += `**Feels Like:** High ${Math.round(daily.apparent_temperature_max[i])}${tempU} / Low ${Math.round(daily.apparent_temperature_min[i])}${tempU}\n`;
-      }
-
-      // Include sunrise/sunset data with timezone
-      if (daily.sunrise?.[i]) {
-        const sunrise = DateTime.fromISO(daily.sunrise[i], { zone: forecast.timezone });
-        output += `**Sunrise:** ${formatLuxonTime(sunrise, prefs)}\n`;
-      }
-
-      if (daily.sunset?.[i]) {
-        const sunset = DateTime.fromISO(daily.sunset[i], { zone: forecast.timezone });
-        output += `**Sunset:** ${formatLuxonTime(sunset, prefs)}\n`;
-      }
-
-      if (daily.daylight_duration?.[i] !== undefined) {
-        const hours = Math.floor(daily.daylight_duration[i] / 3600);
-        const minutes = Math.floor((daily.daylight_duration[i] % 3600) / 60);
-        output += `**Daylight Duration:** ${hours}h ${minutes}m\n`;
-      }
-
-      if (include_precipitation_probability && daily.precipitation_probability_max?.[i] !== undefined) {
-        output += `**Precipitation Chance:** ${daily.precipitation_probability_max[i]}%\n`;
-      }
-
-      if (daily.precipitation_sum?.[i] !== undefined && daily.precipitation_sum[i] > 0) {
-        output += `**Precipitation:** ${daily.precipitation_sum[i].toFixed(2)} ${precipU}\n`;
-      }
-
-      if (daily.wind_speed_10m_max?.[i] !== undefined) {
-        const windDir = daily.wind_direction_10m_dominant?.[i] !== undefined
-          ? ` ${getWindDirection(daily.wind_direction_10m_dominant[i])}`
-          : '';
-        output += `**Wind:** ${Math.round(daily.wind_speed_10m_max[i])} ${windU}${windDir}\n`;
-
-        if (daily.wind_gusts_10m_max?.[i] !== undefined && daily.wind_gusts_10m_max[i] > daily.wind_speed_10m_max[i] * 1.2) {
-          output += `**Wind Gusts:** ${Math.round(daily.wind_gusts_10m_max[i])} ${windU}\n`;
-        }
-      }
-
-      if (daily.weather_code?.[i] !== undefined) {
-        output += `**Conditions:** ${openMeteoService.getWeatherDescription(daily.weather_code[i])}\n`;
-      }
-
-      if (daily.uv_index_max?.[i] !== undefined) {
-        output += `**UV Index:** ${daily.uv_index_max[i].toFixed(1)}\n`;
-      }
-
-      output += `\n`;
+      const rain = value(daily.precipitation_sum, i);
+      if (rain !== undefined) output += `- Precipitation: ${rain}${units.precipitation_sum ?? ''}\n`;
+      const wind = value(daily.wind_speed_10m_max, i);
+      const gust = value(daily.wind_gusts_10m_max, i);
+      if (wind !== undefined) output += `- Maximum wind: ${wind}${units.wind_speed_10m_max ?? ''}${gust !== undefined ? `, gusts ${gust}${units.wind_gusts_10m_max ?? ''}` : ''}\n`;
+      const uv = value(daily.uv_index_max, i);
+      if (uv !== undefined) output += `- Maximum UV index: ${uv}\n`;
+      const sunrise = value(daily.sunrise, i);
+      const sunset = value(daily.sunset, i);
+      if (sunrise && sunset) output += `- Sunrise / sunset: ${sunrise} / ${sunset}\n`;
+      output += '\n';
     }
   }
 
-  output += `---\n`;
-  output += `*Data source: Open-Meteo (Global)*\n`;
-
-  // Add climate normals if requested and for daily forecasts only
-  if (include_normals && granularity === 'daily' && forecast.daily) {
-    try {
-      // Get the first forecast day
-      const firstDay = forecast.daily.time[0];
-      if (firstDay) {
-        const { month, day } = getDateComponents(firstDay);
-
-        // Fetch climate normals using hybrid strategy
-        const normals = await getClimateNormals(
-          openMeteoService,
-          nceiService,
-          latitude,
-          longitude,
-          month,
-          day
-        );
-
-        // Get forecasted high/low for comparison (first day)
-        const currentTemps = {
-          high: forecast.daily.temperature_2m_max?.[0] !== undefined
-            ? Math.round(forecast.daily.temperature_2m_max[0])
-            : undefined,
-          low: forecast.daily.temperature_2m_min?.[0] !== undefined
-            ? Math.round(forecast.daily.temperature_2m_min[0])
-            : undefined
-        };
-
-        output += formatNormals(normals, currentTemps, prefs);
-      }
-    } catch (error) {
-      // If normals fetch fails, just skip it (don't error the whole request)
-      output += `\n## Climate Normals\n\n`;
-      output += `⚠️ Climate normals data not available for this location.\n`;
-    }
+  if (includeNormals) {
+    const today = new Date();
+    const normals = await openMeteoService.getClimateNormals(
+      resolved.latitude,
+      resolved.longitude,
+      today.getMonth() + 1,
+      today.getDate()
+    );
+    output += '## Climate reference\n\n';
+    output += `30-year average high / low: ${normals.tempHigh.toFixed(1)}°F / ${normals.tempLow.toFixed(1)}°F\n\n`;
   }
 
-  return {
-    content: [
-      {
-        type: 'text',
-        text: output
-      }
-    ]
-  };
-}
-
-/**
- * Convert wind direction degrees to cardinal direction
- */
-function getWindDirection(degrees: number): string {
-  const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-  const index = Math.round(degrees / 22.5) % 16;
-  return directions[index];
+  output += '---\n*Forecast data: Open-Meteo. Official Philippine warnings: PAGASA-DOST.*\n';
+  return prependLocationLine({ content: [{ type: 'text', text: output }] }, resolved);
 }

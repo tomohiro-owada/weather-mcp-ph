@@ -241,25 +241,3 @@ export function formatPollutantConcentration(value: number | undefined, units: s
 
   return units ? `${formatted} ${units}` : formatted;
 }
-
-/**
- * Determine which AQI to prioritize based on location
- * US locations should show US AQI, others show European AQI
- */
-export function shouldUseUSAQI(latitude: number, longitude: number): boolean {
-  // Continental US, Alaska, Hawaii, and territories
-  // Continental US: roughly 24°N to 49°N, -125°W to -66°W
-  // Alaska: roughly 51°N to 71°N, -180°W to -130°W
-  // Hawaii: roughly 18°N to 28°N, -160°W to -154°W
-  // Puerto Rico: roughly 17.5°N to 18.5°N, -67.5°W to -65.5°W
-  // Other territories are less common but generally in Pacific/Caribbean
-
-  const isContiguousUS = latitude >= 24 && latitude <= 49 && longitude >= -125 && longitude <= -66;
-  const isAlaska = latitude >= 51 && latitude <= 71 && longitude >= -180 && longitude <= -130;
-  const isHawaii = latitude >= 18 && latitude <= 28 && longitude >= -160 && longitude <= -154;
-  const isPuertoRico = latitude >= 17.5 && latitude <= 18.5 && longitude >= -67.5 && longitude <= -65.5;
-  const isUSVirginIslands = latitude >= 17.5 && latitude <= 18.5 && longitude >= -65.5 && longitude <= -64.5;
-  const isGuam = latitude >= 13 && latitude <= 14 && longitude >= 144 && longitude <= 145;
-
-  return isContiguousUS || isAlaska || isHawaii || isPuertoRico || isUSVirginIslands || isGuam;
-}

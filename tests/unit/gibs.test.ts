@@ -4,30 +4,25 @@ import { GibsService } from '../../src/services/gibs.js';
 describe('GibsService (satellite imagery)', () => {
   const service = new GibsService();
 
-  describe('layer selection', () => {
-    it('uses GOES-East for the eastern/central US', () => {
-      const [frame] = service.getSatelliteImagery(40.7128, -74.006); // New York
-      expect(frame.url).toContain('GOES-East_ABI_GeoColor');
-    });
-
-    it('uses GOES-West for far-western/Pacific longitudes', () => {
-      const [frame] = service.getSatelliteImagery(21.3069, -157.8583); // Honolulu
-      expect(frame.url).toContain('GOES-West_ABI_GeoColor');
+  describe('Philippines layer', () => {
+    it('uses Himawari-9 clean infrared imagery', () => {
+      const [frame] = service.getSatelliteImagery(14.5995, 120.9842);
+      expect(frame.url).toContain('Himawari_AHI_Band13_Clean_Infrared');
     });
   });
 
   describe('latest frame (non-animated)', () => {
     it('returns exactly one frame with a valid GIBS WMTS tile URL', () => {
-      const frames = service.getSatelliteImagery(39.7392, -104.9903); // Denver
+      const frames = service.getSatelliteImagery(14.5995, 120.9842);
       expect(frames).toHaveLength(1);
       const url = frames[0].url;
       expect(url).toContain('https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/');
-      expect(url).toContain('GoogleMapsCompatible_Level7');
+      expect(url).toContain('GoogleMapsCompatible_Level6');
       expect(url).toMatch(/\/\d+\/\d+\/\d+\.png$/); // /{z}/{y}/{x}.png
     });
 
     it('omits the time dimension for the latest frame', () => {
-      const [frame] = service.getSatelliteImagery(39.7392, -104.9903);
+      const [frame] = service.getSatelliteImagery(14.5995, 120.9842);
       // No ISO timestamp segment in the latest-frame URL.
       expect(frame.url).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
     });

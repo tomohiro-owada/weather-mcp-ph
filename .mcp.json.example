@@ -1,10 +1,12 @@
 {
   "mcpServers": {
-    "weather": {
+    "weather-ph": {
       "command": "node",
-      "args": [
-        "/absolute/path/to/weather-mcp/dist/index.js"
-      ]
+      "args": ["/absolute/path/to/weather-mcp-ph/dist/index.js"],
+      "env": {
+        "ENABLED_TOOLS": "standard",
+        "WEATHER_UNITS": "metric"
+      }
     }
   }
 }
