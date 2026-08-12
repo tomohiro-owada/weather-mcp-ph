@@ -76,12 +76,54 @@ For all tools:
 ENABLED_TOOLS=full node dist/index.js
 ```
 
+## Streamable HTTP and HTTPS
+
+stdio remains the default. To run the same server with the stateful MCP Streamable HTTP transport:
+
+```bash
+MCP_TRANSPORT=http \
+MCP_HOST=127.0.0.1 \
+PORT=3000 \
+MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
+node dist/index.js
+```
+
+The MCP endpoint is `http://127.0.0.1:3000/mcp`; `GET /health` is an unauthenticated liveness check. MCP requests require `Authorization: Bearer <token>` whenever `MCP_AUTH_TOKEN` is set.
+
+For internet-facing use, keep the Node process on loopback and terminate HTTPS at a reverse proxy. A minimal Caddy configuration is:
+
+```bash
+MCP_TRANSPORT=http \
+MCP_HOST=127.0.0.1 \
+PORT=3000 \
+MCP_AUTH_TOKEN="replace-with-a-long-random-token" \
+MCP_ALLOWED_HOSTS=weather.example.com \
+node dist/index.js
+```
+
+```caddyfile
+weather.example.com {
+  reverse_proxy 127.0.0.1:3000
+}
+```
+
+Clients then connect to `https://weather.example.com/mcp` with the bearer token. If the process must bind directly to `0.0.0.0`, `MCP_AUTH_TOKEN` is mandatory unless the operator explicitly sets `MCP_ALLOW_UNAUTHENTICATED=true`. `MCP_ALLOWED_HOSTS` is needed when a reverse proxy forwards a public Host header to a loopback-bound process.
+
+Sessions are kept in memory and expire after one hour of inactivity by default. Run a single application process unless session affinity is provided; TLS and rate limiting belong at the reverse proxy.
+
 Optional environment variables:
 
 | Variable | Meaning |
 |---|---|
 | `ENABLED_TOOLS` | `basic` (default), `standard`, `full`, or a comma-separated tool list |
 | `WEATHER_UNITS` | `metric` or `imperial` |
+| `MCP_TRANSPORT` | `stdio` (default), `http`, or `streamable-http` |
+| `MCP_HOST` / `PORT` | HTTP bind address and port; defaults to `127.0.0.1:3000` |
+| `MCP_PATH` | Streamable HTTP endpoint; defaults to `/mcp` |
+| `MCP_AUTH_TOKEN` | Bearer token for remote MCP access |
+| `MCP_ALLOWED_HOSTS` | Optional comma-separated Host-header allowlist |
+| `MCP_MAX_SESSIONS` | Maximum concurrent in-memory HTTP sessions; defaults to 100 |
+| `MCP_SESSION_TTL_MS` | Idle session expiry; defaults to one hour |
 | `FIRMS_MAP_KEY` | Free NASA FIRMS map key for heat-anomaly queries |
 | `WEATHER_LIGHTNING_PREWARM` | Set `false` to disable saved-location lightning prewarming |
 | `LOG_LEVEL` | Logging level |

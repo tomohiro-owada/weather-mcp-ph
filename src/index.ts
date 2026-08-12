@@ -10,10 +10,15 @@ import 'dotenv/config';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
 import {
   CallToolRequestSchema,
+  isInitializeRequest,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Request, Response } from 'express';
 import { OpenMeteoService } from './services/openmeteo.js';
 import { NominatimService } from './services/nominatim.js';
 import { GeocodingService } from './services/geocoding.js';
@@ -117,21 +122,6 @@ const locationStore = new LocationStore();
  * Automatic fallback strategy for maximum reliability
  */
 const geocodingService = new GeocodingService();
-
-/**
- * Create MCP server instance
- */
-const server = new Server(
-  {
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
 
 /**
  * Shared unit / localization parameters. Spread into weather tools so the AI can
@@ -625,6 +615,12 @@ const TOOL_DEFINITIONS = {
  * Handler for listing available tools
  * Only returns tools that are enabled in the configuration
  */
+function createWeatherServer(): Server {
+  const server = new Server(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    { capabilities: { tools: {} } }
+  );
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const enabledTools = toolConfig.getEnabledTools();
   const tools = enabledTools
@@ -760,6 +756,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+  return server;
+}
+
 /**
  * Start the server
  */
@@ -796,59 +795,247 @@ function prewarmLightningMonitoring(): void {
   }
 }
 
-async function main() {
-  const transport = new StdioServerTransport();
+function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
 
-  // Set up graceful shutdown handlers
-  const shutdown = async (signal: string) => {
-    logger.info(`Received ${signal}, shutting down gracefully...`);
+function bearerMatches(expected: string, authorization: string | undefined): boolean {
+  if (!authorization?.startsWith('Bearer ')) return false;
+  const actual = authorization.slice('Bearer '.length);
+  const expectedBytes = Buffer.from(expected);
+  const actualBytes = Buffer.from(actual);
+  return expectedBytes.length === actualBytes.length && timingSafeEqual(expectedBytes, actualBytes);
+}
 
+interface HttpSession {
+  transport: StreamableHTTPServerTransport;
+  server: Server;
+  lastUsedAt: number;
+}
+
+async function startStreamableHttp(): Promise<() => Promise<void>> {
+  const host = process.env.MCP_HOST?.trim() || '127.0.0.1';
+  const port = parsePositiveInteger(process.env.PORT || process.env.MCP_PORT, 3000, 'PORT');
+  const mcpPath = process.env.MCP_PATH?.trim() || '/mcp';
+  if (!mcpPath.startsWith('/') || mcpPath.includes('?') || mcpPath.includes('#')) {
+    throw new Error('MCP_PATH must be an absolute URL path such as /mcp');
+  }
+
+  const authToken = process.env.MCP_AUTH_TOKEN?.trim();
+  const allowUnauthenticated = process.env.MCP_ALLOW_UNAUTHENTICATED === 'true';
+  const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1']);
+  if (!authToken && !allowUnauthenticated && !loopbackHosts.has(host)) {
+    throw new Error(
+      'MCP_AUTH_TOKEN is required when MCP_HOST is not loopback. ' +
+      'Set a strong token or explicitly set MCP_ALLOW_UNAUTHENTICATED=true.'
+    );
+  }
+
+  const allowedHosts = process.env.MCP_ALLOWED_HOSTS
+    ?.split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+  const app = createMcpExpressApp({
+    host,
+    allowedHosts: allowedHosts && allowedHosts.length > 0 ? allowedHosts : undefined
+  });
+  app.disable('x-powered-by');
+  const sessions = new Map<string, HttpSession>();
+  const maxSessions = parsePositiveInteger(process.env.MCP_MAX_SESSIONS, 100, 'MCP_MAX_SESSIONS');
+  const sessionTtlMs = parsePositiveInteger(
+    process.env.MCP_SESSION_TTL_MS,
+    60 * 60 * 1000,
+    'MCP_SESSION_TTL_MS'
+  );
+
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ok', transport: 'streamable-http', version: SERVER_VERSION });
+  });
+
+  if (authToken) {
+    app.use(mcpPath, (req, res, next) => {
+      if (!bearerMatches(authToken, req.header('authorization'))) {
+        res.setHeader('WWW-Authenticate', 'Bearer');
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      next();
+    });
+  }
+
+  app.post(mcpPath, async (req, res) => {
     try {
-      // 1. Flush analytics first (fast)
+      const sessionId = req.header('mcp-session-id');
+      const existing = sessionId ? sessions.get(sessionId) : undefined;
+      if (existing) {
+        existing.lastUsedAt = Date.now();
+        await existing.transport.handleRequest(req, res, req.body);
+        return;
+      }
+      if (sessionId || !isInitializeRequest(req.body)) {
+        res.status(sessionId ? 404 : 400).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'Invalid or missing MCP session' },
+          id: null
+        });
+        return;
+      }
+      if (sessions.size >= maxSessions) {
+        res.status(503).json({
+          jsonrpc: '2.0',
+          error: { code: -32000, message: 'MCP session capacity reached' },
+          id: null
+        });
+        return;
+      }
+
+      let weatherServer!: Server;
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: initializedId => {
+          sessions.set(initializedId, {
+            transport,
+            server: weatherServer,
+            lastUsedAt: Date.now()
+          });
+        },
+        onsessionclosed: closedId => {
+          sessions.delete(closedId);
+        }
+      });
+      transport.onclose = () => {
+        const initializedId = transport.sessionId;
+        if (initializedId) sessions.delete(initializedId);
+      };
+      weatherServer = createWeatherServer();
+      try {
+        await weatherServer.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      } catch (error) {
+        await weatherServer.close().catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      logger.error('Streamable HTTP request failed', error as Error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null
+        });
+      }
+    }
+  });
+
+  const handleSessionRequest = async (
+    req: Request,
+    res: Response
+  ) => {
+    const sessionId = req.header('mcp-session-id');
+    const session = sessionId ? sessions.get(sessionId) : undefined;
+    if (!session) {
+      res.status(404).json({ error: 'Invalid or missing MCP session' });
+      return;
+    }
+    session.lastUsedAt = Date.now();
+    try {
+      await session.transport.handleRequest(req, res);
+    } catch (error) {
+      logger.error('Streamable HTTP session request failed', error as Error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null
+        });
+      }
+    }
+  };
+  app.get(mcpPath, handleSessionRequest);
+  app.delete(mcpPath, handleSessionRequest);
+
+  const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
+    const listener = app.listen(port, host, () => resolve(listener));
+    listener.once('error', reject);
+  });
+  const sweepInterval = setInterval(() => {
+    const cutoff = Date.now() - sessionTtlMs;
+    for (const [sessionId, session] of sessions) {
+      if (session.lastUsedAt < cutoff) {
+        sessions.delete(sessionId);
+        void session.server.close().catch(error =>
+          logger.warn('Failed to close expired MCP session', { error: String(error) })
+        );
+      }
+    }
+  }, Math.min(sessionTtlMs, 60_000));
+  sweepInterval.unref();
+
+  logger.info('Weather MCP Streamable HTTP server started', {
+    host,
+    port,
+    path: mcpPath,
+    authentication: authToken ? 'bearer' : 'none',
+    tls: 'terminate HTTPS at a reverse proxy'
+  });
+
+  return async () => {
+    clearInterval(sweepInterval);
+    await Promise.allSettled(Array.from(sessions.values(), session => session.server.close()));
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close(error => error ? reject(error) : resolve());
+    });
+  };
+}
+
+async function main() {
+  const mode = (process.env.MCP_TRANSPORT?.trim().toLowerCase() || 'stdio');
+  let closeTransport: () => Promise<void>;
+
+  if (mode === 'stdio') {
+    const server = createWeatherServer();
+    await server.connect(new StdioServerTransport());
+    closeTransport = () => server.close();
+    logger.info('Weather MCP stdio server started');
+  } else if (mode === 'http' || mode === 'streamable-http') {
+    closeTransport = await startStreamableHttp();
+  } else {
+    throw new Error('MCP_TRANSPORT must be stdio, http, or streamable-http');
+  }
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`Received ${signal}, shutting down gracefully...`);
+    try {
+      await closeTransport();
       await analytics.shutdown();
-      logger.info('Analytics flushed');
-
-      // 2. Clean up resources
       openMeteoService.clearCache();
-      logger.info('Cache cleared');
-
-      // 3. Close server connection
-      await server.close();
-      logger.info('Server closed');
-
       process.exit(0);
     } catch (error) {
       logger.error('Error during shutdown', error as Error);
       process.exit(1);
     }
   };
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
-
-  try {
-    await server.connect(transport);
-    logger.info('Weather MCP Server started', {
-      version: SERVER_VERSION,
-      cacheEnabled: CacheConfig.enabled,
-      logLevel: process.env.LOG_LEVEL || 'INFO',
-      enabledTools: toolConfig.getEnabledTools().length,
-      toolList: toolConfig.getEnabledTools().join(', ')
-    });
-
-    // Begin buffering lightning strikes for saved locations so their coverage
-    // accumulates before the first query (non-blocking, best-effort).
-    prewarmLightningMonitoring();
-
-    // Inform users about version and upgrade options
-    logger.info('Version check', {
-      installedVersion: SERVER_VERSION,
-      repository: 'https://github.com/tomohiro-owada/weather-mcp-ph'
-    });
-  } catch (error) {
-    logger.error('Failed to start server', error as Error);
-    throw error;
-  }
+  logger.info('Weather MCP Server ready', {
+    version: SERVER_VERSION,
+    transport: mode,
+    cacheEnabled: CacheConfig.enabled,
+    logLevel: process.env.LOG_LEVEL || 'INFO',
+    enabledTools: toolConfig.getEnabledTools().length,
+    toolList: toolConfig.getEnabledTools().join(', '),
+    repository: 'https://github.com/tomohiro-owada/weather-mcp-ph'
+  });
+  prewarmLightningMonitoring();
 }
 
 main().catch((error) => {
