@@ -13,11 +13,17 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
 import {
+  getOAuthProtectedResourceMetadataUrl,
+  mcpAuthRouter
+} from '@modelcontextprotocol/sdk/server/auth/router.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import {
   CallToolRequestSchema,
   isInitializeRequest,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { homedir } from 'node:os';
 import type { Request, Response } from 'express';
 import { OpenMeteoService } from './services/openmeteo.js';
 import { NominatimService } from './services/nominatim.js';
@@ -41,6 +47,7 @@ import { handleGetLightningActivity } from './handlers/lightningHandler.js';
 import { handleGetRiverConditions } from './handlers/riverConditionsHandler.js';
 import { handleGetWildfireInfo } from './handlers/wildfireHandler.js';
 import { handleGetWeatherSummary } from './handlers/weatherSummaryHandler.js';
+import { GoogleOAuthProvider, GOOGLE_OAUTH_SCOPE } from './auth/googleOAuthProvider.js';
 import {
   handleSaveLocation,
   handleListSavedLocations,
@@ -827,12 +834,26 @@ async function startStreamableHttp(): Promise<() => Promise<void>> {
   }
 
   const authToken = process.env.MCP_AUTH_TOKEN?.trim();
+  const googleClientId = process.env.MCP_GOOGLE_CLIENT_ID?.trim();
+  const googleClientSecret = process.env.MCP_GOOGLE_CLIENT_SECRET?.trim();
+  const googleAllowedEmails = process.env.MCP_GOOGLE_ALLOWED_EMAILS
+    ?.split(/[\s,]+/)
+    .map(value => value.trim().toLowerCase())
+    .filter(Boolean) ?? [];
+  const oauthValues = [googleClientId, googleClientSecret, googleAllowedEmails.length > 0];
+  const googleOAuthEnabled = oauthValues.every(Boolean);
+  if (!googleOAuthEnabled && oauthValues.some(Boolean)) {
+    throw new Error(
+      'Google OAuth requires MCP_GOOGLE_CLIENT_ID, MCP_GOOGLE_CLIENT_SECRET, and ' +
+      'MCP_GOOGLE_ALLOWED_EMAILS together'
+    );
+  }
   const allowUnauthenticated = process.env.MCP_ALLOW_UNAUTHENTICATED === 'true';
   const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1']);
-  if (!authToken && !allowUnauthenticated && !loopbackHosts.has(host)) {
+  if (!authToken && !googleOAuthEnabled && !allowUnauthenticated && !loopbackHosts.has(host)) {
     throw new Error(
-      'MCP_AUTH_TOKEN is required when MCP_HOST is not loopback. ' +
-      'Set a strong token or explicitly set MCP_ALLOW_UNAUTHENTICATED=true.'
+      'Authentication is required when MCP_HOST is not loopback. Configure Google OAuth, ' +
+      'set MCP_AUTH_TOKEN, or explicitly set MCP_ALLOW_UNAUTHENTICATED=true.'
     );
   }
 
@@ -845,6 +866,7 @@ async function startStreamableHttp(): Promise<() => Promise<void>> {
     allowedHosts: allowedHosts && allowedHosts.length > 0 ? allowedHosts : undefined
   });
   app.disable('x-powered-by');
+  app.set('trust proxy', 'loopback');
   const sessions = new Map<string, HttpSession>();
   const maxSessions = parsePositiveInteger(process.env.MCP_MAX_SESSIONS, 100, 'MCP_MAX_SESSIONS');
   const sessionTtlMs = parsePositiveInteger(
@@ -857,7 +879,63 @@ async function startStreamableHttp(): Promise<() => Promise<void>> {
     res.json({ status: 'ok', transport: 'streamable-http', version: SERVER_VERSION });
   });
 
-  if (authToken) {
+  let googleOAuthProvider: GoogleOAuthProvider | undefined;
+  let resourceMetadataUrl: string | undefined;
+  if (googleOAuthEnabled) {
+    const publicBaseUrlValue = process.env.MCP_PUBLIC_URL?.trim();
+    if (!publicBaseUrlValue) {
+      throw new Error('MCP_PUBLIC_URL is required when Google OAuth is enabled');
+    }
+    const publicBaseUrl = new URL(publicBaseUrlValue);
+    if (publicBaseUrl.protocol !== 'https:') {
+      throw new Error('MCP_PUBLIC_URL must use HTTPS when Google OAuth is enabled');
+    }
+    const resourceUrl = new URL(mcpPath, publicBaseUrl);
+    const callbackUrl = new URL('/oauth/callback', publicBaseUrl);
+    googleOAuthProvider = new GoogleOAuthProvider({
+      clientId: googleClientId!,
+      clientSecret: googleClientSecret!,
+      callbackUrl,
+      resourceUrl,
+      allowedEmails: googleAllowedEmails,
+      storePath: process.env.MCP_OAUTH_STORE_PATH?.trim()
+        || join(homedir(), '.weather-mcp', 'oauth.json')
+    });
+    resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(resourceUrl);
+    app.use(mcpAuthRouter({
+      provider: googleOAuthProvider,
+      issuerUrl: publicBaseUrl,
+      resourceServerUrl: resourceUrl,
+      scopesSupported: [GOOGLE_OAUTH_SCOPE],
+      resourceName: 'Weather MCP Philippines',
+      clientRegistrationOptions: { clientIdGeneration: false }
+    }));
+    app.get(callbackUrl.pathname, async (req, res) => {
+      try {
+        const requestUrl = new URL(req.originalUrl, publicBaseUrl);
+        const redirect = await googleOAuthProvider!.handleGoogleCallback(requestUrl.searchParams);
+        res.redirect(redirect.href);
+      } catch (error) {
+        logger.warn('Google OAuth callback rejected', { error: String(error) });
+        res.status(400).type('text/plain').send('Unable to complete Google authentication.');
+      }
+    });
+  }
+
+  if (googleOAuthProvider) {
+    const oauthMiddleware = requireBearerAuth({
+      verifier: googleOAuthProvider,
+      requiredScopes: [GOOGLE_OAUTH_SCOPE],
+      resourceMetadataUrl
+    });
+    app.use(mcpPath, (req, res, next) => {
+      if (authToken && bearerMatches(authToken, req.header('authorization'))) {
+        next();
+        return;
+      }
+      oauthMiddleware(req, res, next);
+    });
+  } else if (authToken) {
     app.use(mcpPath, (req, res, next) => {
       if (!bearerMatches(authToken, req.header('authorization'))) {
         res.setHeader('WWW-Authenticate', 'Bearer');
@@ -980,7 +1058,9 @@ async function startStreamableHttp(): Promise<() => Promise<void>> {
     host,
     port,
     path: mcpPath,
-    authentication: authToken ? 'bearer' : 'none',
+    authentication: googleOAuthProvider
+      ? (authToken ? 'google-oauth+static-bearer' : 'google-oauth')
+      : (authToken ? 'static-bearer' : 'none'),
     tls: 'terminate HTTPS at a reverse proxy'
   });
 

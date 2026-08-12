@@ -109,6 +109,32 @@ weather.example.com {
 
 Clients then connect to `https://weather.example.com/mcp` with the bearer token. If the process must bind directly to `0.0.0.0`, `MCP_AUTH_TOKEN` is mandatory unless the operator explicitly sets `MCP_ALLOW_UNAUTHENTICATED=true`. `MCP_ALLOWED_HOSTS` is needed when a reverse proxy forwards a public Host header to a loopback-bound process.
 
+### Google OAuth for MCP clients
+
+Clients that cannot set a static Authorization header can use the MCP OAuth 2.1 flow. The server provides Protected Resource Metadata, Authorization Server Metadata, Dynamic Client Registration, Authorization Code with PKCE, rotating refresh tokens, and revocation. Google is used only to verify the person's identity; MCP access and refresh tokens are issued locally and stored as hashes.
+
+Create or reuse a Google OAuth web client and register this exact redirect URI:
+
+```text
+https://weather.example.com/oauth/callback
+```
+
+Then run:
+
+```bash
+MCP_TRANSPORT=http \
+MCP_HOST=127.0.0.1 \
+PORT=3000 \
+MCP_PUBLIC_URL=https://weather.example.com \
+MCP_GOOGLE_CLIENT_ID=your-client.apps.googleusercontent.com \
+MCP_GOOGLE_CLIENT_SECRET=your-client-secret \
+MCP_GOOGLE_ALLOWED_EMAILS=owner@example.com \
+MCP_ALLOWED_HOSTS=weather.example.com \
+node dist/index.js
+```
+
+`MCP_GOOGLE_ALLOWED_EMAILS` is mandatory and accepts comma- or whitespace-separated addresses. Only those verified Google accounts can finish authorization. OAuth clients are dynamically registered at `/register`; the other endpoints are advertised through `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`. The local OAuth state defaults to `~/.weather-mcp/oauth.json`; protect this file and its parent directory. `MCP_AUTH_TOKEN` may be set at the same time as an optional compatibility path for clients that support static headers.
+
 Sessions are kept in memory and expire after one hour of inactivity by default. Run a single application process unless session affinity is provided; TLS and rate limiting belong at the reverse proxy.
 
 Optional environment variables:
@@ -121,6 +147,10 @@ Optional environment variables:
 | `MCP_HOST` / `PORT` | HTTP bind address and port; defaults to `127.0.0.1:3000` |
 | `MCP_PATH` | Streamable HTTP endpoint; defaults to `/mcp` |
 | `MCP_AUTH_TOKEN` | Bearer token for remote MCP access |
+| `MCP_PUBLIC_URL` | Public HTTPS origin; required for Google OAuth |
+| `MCP_GOOGLE_CLIENT_ID` / `MCP_GOOGLE_CLIENT_SECRET` | Google OAuth web-client credentials |
+| `MCP_GOOGLE_ALLOWED_EMAILS` | Required allowlist of verified Google accounts |
+| `MCP_OAUTH_STORE_PATH` | OAuth state file; defaults to `~/.weather-mcp/oauth.json` |
 | `MCP_ALLOWED_HOSTS` | Optional comma-separated Host-header allowlist |
 | `MCP_MAX_SESSIONS` | Maximum concurrent in-memory HTTP sessions; defaults to 100 |
 | `MCP_SESSION_TTL_MS` | Idle session expiry; defaults to one hour |
