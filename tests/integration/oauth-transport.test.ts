@@ -50,7 +50,7 @@ describe('Google OAuth discovery and dynamic client registration', () => {
         MCP_PUBLIC_URL: PUBLIC_URL,
         MCP_GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com',
         MCP_GOOGLE_CLIENT_SECRET: 'test-client-secret',
-        MCP_GOOGLE_ALLOWED_EMAILS: 'owner@example.com',
+        MCP_GOOGLE_ALLOWED_EMAILS: '["owner@example.com"]',
         MCP_OAUTH_STORE_PATH: join(temporaryDirectory, 'oauth.json'),
         ENABLED_TOOLS: 'basic',
         ANALYTICS_ENABLED: 'false',

@@ -133,7 +133,7 @@ MCP_ALLOWED_HOSTS=weather.example.com \
 node dist/index.js
 ```
 
-`MCP_GOOGLE_ALLOWED_EMAILS` is mandatory and accepts comma- or whitespace-separated addresses. Only those verified Google accounts can finish authorization. OAuth clients are dynamically registered at `/register`; the other endpoints are advertised through `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`. The local OAuth state defaults to `~/.weather-mcp/oauth.json`; protect this file and its parent directory. `MCP_AUTH_TOKEN` may be set at the same time as an optional compatibility path for clients that support static headers.
+`MCP_GOOGLE_ALLOWED_EMAILS` is mandatory and accepts comma- or whitespace-separated addresses or a JSON string array. Only those verified Google accounts can finish authorization. OAuth clients are dynamically registered at `/register`; the other endpoints are advertised through `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`. The local OAuth state defaults to `~/.weather-mcp/oauth.json`; protect this file and its parent directory. `MCP_AUTH_TOKEN` may be set at the same time as an optional compatibility path for clients that support static headers.
 
 Sessions are kept in memory and expire after one hour of inactivity by default. Run a single application process unless session affinity is provided; TLS and rate limiting belong at the reverse proxy.
 

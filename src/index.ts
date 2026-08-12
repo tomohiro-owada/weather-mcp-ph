@@ -811,6 +811,24 @@ function parsePositiveInteger(value: string | undefined, fallback: number, name:
   return parsed;
 }
 
+function parseStringList(value: string | undefined, name: string): string[] {
+  if (!value?.trim()) return [];
+  const trimmed = value.trim();
+  if (trimmed.startsWith('[')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error(`${name} must be a JSON string array or a comma-separated list`);
+    }
+    if (!Array.isArray(parsed) || parsed.some(item => typeof item !== 'string')) {
+      throw new Error(`${name} must be a JSON string array or a comma-separated list`);
+    }
+    return parsed.map(item => item.trim()).filter(Boolean);
+  }
+  return trimmed.split(/[\s,]+/).map(item => item.trim()).filter(Boolean);
+}
+
 function bearerMatches(expected: string, authorization: string | undefined): boolean {
   if (!authorization?.startsWith('Bearer ')) return false;
   const actual = authorization.slice('Bearer '.length);
@@ -836,10 +854,10 @@ async function startStreamableHttp(): Promise<() => Promise<void>> {
   const authToken = process.env.MCP_AUTH_TOKEN?.trim();
   const googleClientId = process.env.MCP_GOOGLE_CLIENT_ID?.trim();
   const googleClientSecret = process.env.MCP_GOOGLE_CLIENT_SECRET?.trim();
-  const googleAllowedEmails = process.env.MCP_GOOGLE_ALLOWED_EMAILS
-    ?.split(/[\s,]+/)
-    .map(value => value.trim().toLowerCase())
-    .filter(Boolean) ?? [];
+  const googleAllowedEmails = parseStringList(
+    process.env.MCP_GOOGLE_ALLOWED_EMAILS,
+    'MCP_GOOGLE_ALLOWED_EMAILS'
+  ).map(value => value.toLowerCase());
   const oauthValues = [googleClientId, googleClientSecret, googleAllowedEmails.length > 0];
   const googleOAuthEnabled = oauthValues.every(Boolean);
   if (!googleOAuthEnabled && oauthValues.some(Boolean)) {
